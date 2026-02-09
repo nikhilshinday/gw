@@ -4,6 +4,19 @@ This file tracks work performed by an automated coding agent in this repo, so hu
 
 ## Work Summary (2026-02-09)
 
+### Picker-First UX: `gw` opens TUI; `ls` alias; new/delete in-picker
+
+- Made `gw` with no args launch the interactive repo/worktree picker (same behavior as `gw go`).
+- Added `gw ls` as an alias for the picker (requested “`ls` can do the same thing as go”).
+- Extended the worktree picker screen:
+  - `Enter` selects the highlighted worktree (prints path for shell integration to `cd`).
+  - `n` prompts for a new branch/worktree name, creates it, and immediately selects it (fast “new+go”).
+  - `Ctrl+D` deletes the selected worktree with an in-picker confirmation (`y/n`); branch is preserved.
+- Prevented hangs when no TTY is available by failing fast with a clear error.
+
+Verification:
+- `cargo test`
+
 ### README: clarified positioning + install options
 
 - Added a cheeky opener framing 2026 as “multi-agent takeoff” and positioned `gw` as the tool for safely babysitting multiple agents via isolated worktrees.
@@ -53,4 +66,3 @@ Pushed annotated tag in this repo so the formula can reference a stable source a
 
 - Add prebuilt binaries (GitHub Releases) to make `brew install` faster (use bottles or release assets + checksums).
 - Add a LICENSE file if you intend this to be redistributed broadly (Homebrew formulas commonly expect a license to be declared/discoverable).
-

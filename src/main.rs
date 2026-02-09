@@ -9,7 +9,7 @@ mod picker;
 #[command(about = "Git worktree helper", long_about = None)]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -38,8 +38,12 @@ enum Command {
         #[arg(long)]
         no_hooks: bool,
     },
-    /// Interactive picker to jump between repos/worktrees (prints selected path)
+    /// Interactive picker to jump between repos/worktrees (prints selected path).
+    ///
+    /// Tip: running `gw` with no args does the same thing.
     Go,
+    /// Alias for `go`
+    Ls,
     /// Interactive worktree removal: pick repo -> worktree, then remove it (no branch deletion)
     Rm {
         /// Worktree path to remove (skips interactive picker)
@@ -67,18 +71,22 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Init { shell: Shell::Zsh } => {
+        Some(Command::Init { shell: Shell::Zsh }) => {
             // A wrapper so `gw go` can `cd` the current shell. `command gw` avoids recursion.
             // Usage: `eval "$(gw init zsh)"`
             println!(
                 r#"# gw shell integration (zsh)
 gw() {{
-  if [[ "$1" == "go" ]]; then
-    local dest
+  local dest
+  if [[ "$#" -eq 0 ]]; then
+    dest="$(command gw)" || return $?
+    if [[ -n "$dest" ]]; then cd "$dest" || return $?; fi
+  elif [[ "$1" == "go" ]]; then
     dest="$(command gw go "${{@:2}}")" || return $?
-    if [[ -n "$dest" ]]; then
-      cd "$dest" || return $?
-    fi
+    if [[ -n "$dest" ]]; then cd "$dest" || return $?; fi
+  elif [[ "$1" == "ls" ]]; then
+    dest="$(command gw ls "${{@:2}}")" || return $?
+    if [[ -n "$dest" ]]; then cd "$dest" || return $?; fi
   elif [[ "$1" == "rm" ]]; then
     command gw rm "${{@:2}}"
   else
@@ -87,7 +95,7 @@ gw() {{
 }}"#
             );
         }
-        Command::List => {
+        Some(Command::List) => {
             let out = std::process::Command::new("git")
                 .args(["worktree", "list", "--porcelain"])
                 .output()?;
@@ -103,83 +111,26 @@ gw() {{
                 println!("{}\t{}", entry.path, branch);
             }
         }
-        Command::New {
+        Some(Command::New {
             branch,
             worktrees_dir,
             path,
             base,
             no_hooks,
-        } => {
-            let repo = RepoContext::detect_from_cwd()?;
+        }) => {
             let cfg_root = config_root()?;
-            let global_cfg = load_global_config(&cfg_root)?;
-
-            let mut repo_cfg = load_repo_config(&cfg_root, &repo).unwrap_or_else(|| RepoConfig {
-                repo_name: repo.repo_name.clone(),
-                git_common_dir: repo.git_common_dir.to_string_lossy().to_string(),
-                anchor_path: repo.toplevel.to_string_lossy().to_string(),
-                worktrees_dir: None,
-                hooks: Vec::new(),
-            });
-
-            if let Some(wd) = worktrees_dir {
-                // If the user picks a shared base (e.g. ~/worktrees), keep per-repo isolation by nesting.
-                let repo_base = wd.join(&repo.repo_name);
-                std::fs::create_dir_all(&repo_base)?;
-                repo_cfg.worktrees_dir = Some(repo_base.to_string_lossy().to_string());
-                save_repo_config(&cfg_root, &repo, &repo_cfg)?;
-            }
-
-            let wt_base = match repo_cfg.worktrees_dir.clone() {
-                Some(w) => w,
-                None => {
-                    let picked = prompt_worktrees_dir(&repo)?;
-                    std::fs::create_dir_all(&picked)?;
-                    repo_cfg.worktrees_dir = Some(picked.to_string_lossy().to_string());
-                    save_repo_config(&cfg_root, &repo, &repo_cfg)?;
-                    picked.to_string_lossy().to_string()
-                }
-            };
-
-            let wt_path = match path {
-                Some(p) => p,
-                None => {
-                    let branch_path = sanitize_branch_for_path(&branch);
-                    PathBuf::from(wt_base).join(branch_path)
-                }
-            };
-            if let Some(parent) = wt_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-
-            let branch_exists = repo.git_show_ref_head(&branch)?;
-
-            let mut args: Vec<String> = vec!["worktree".into(), "add".into()];
-            if !branch_exists {
-                args.push("-b".into());
-                args.push(branch.clone());
-            }
-            args.push(wt_path.to_string_lossy().to_string());
-            if branch_exists {
-                args.push(branch.clone());
-            } else if let Some(base) = base.clone() {
-                args.push(base);
-            }
-
-            repo.run_git_strings(&args)?;
-
-            // Update anchor path to the created worktree so `gw go` can find it later.
-            repo_cfg.anchor_path = wt_path.to_string_lossy().to_string();
-            save_repo_config(&cfg_root, &repo, &repo_cfg)?;
-
-            if !no_hooks {
-                let mut hooks = Vec::new();
-                hooks.extend(global_cfg.hooks);
-                hooks.extend(repo_cfg.hooks);
-                run_hooks(&hooks, &repo, &branch, &wt_path)?;
-            }
+            let repo = RepoContext::detect_from_cwd()?;
+            let _ = create_worktree(
+                &repo.toplevel,
+                &cfg_root,
+                &branch,
+                worktrees_dir,
+                path,
+                base,
+                no_hooks,
+            )?;
         }
-        Command::Go => {
+        None | Some(Command::Go) | Some(Command::Ls) => {
             let repo = RepoContext::detect_from_cwd().ok();
             let cfg_root = config_root()?;
             if let Some(sel) = picker::pick_worktree(&cfg_root, repo)? {
@@ -189,7 +140,7 @@ gw() {{
                 std::process::exit(1);
             }
         }
-        Command::Rm { path, yes, force } => {
+        Some(Command::Rm { path, yes, force }) => {
             if let Some(path) = path {
                 let repo = RepoContext::detect_from_cwd()?;
                 remove_worktree(&repo.toplevel, &path, yes, force)?;
@@ -202,7 +153,7 @@ gw() {{
                 remove_worktree(&sel.repo_anchor, &sel.worktree_path, yes, force)?;
             }
         }
-        Command::Config => {
+        Some(Command::Config) => {
             let cfg_root = config_root()?;
             println!("config_root={}", cfg_root.to_string_lossy());
             println!(
@@ -221,7 +172,7 @@ gw() {{
                 }
             }
         }
-        Command::Hooks => {
+        Some(Command::Hooks) => {
             let cfg_root = config_root()?;
             let global = load_global_config(&cfg_root)?;
             for h in global.hooks {
@@ -238,6 +189,86 @@ gw() {{
     }
 
     Ok(())
+}
+
+pub(crate) fn create_worktree(
+    repo_cwd: &Path,
+    cfg_root: &Path,
+    branch: &str,
+    worktrees_dir: Option<PathBuf>,
+    path: Option<PathBuf>,
+    base: Option<String>,
+    no_hooks: bool,
+) -> anyhow::Result<PathBuf> {
+    let repo = RepoContext::detect_from_path(repo_cwd)?;
+    let global_cfg = load_global_config(cfg_root)?;
+
+    let mut repo_cfg = load_repo_config(cfg_root, &repo).unwrap_or_else(|| RepoConfig {
+        repo_name: repo.repo_name.clone(),
+        git_common_dir: repo.git_common_dir.to_string_lossy().to_string(),
+        anchor_path: repo.toplevel.to_string_lossy().to_string(),
+        worktrees_dir: None,
+        hooks: Vec::new(),
+    });
+
+    if let Some(wd) = worktrees_dir {
+        // If the user picks a shared base (e.g. ~/worktrees), keep per-repo isolation by nesting.
+        let repo_base = wd.join(&repo.repo_name);
+        std::fs::create_dir_all(&repo_base)?;
+        repo_cfg.worktrees_dir = Some(repo_base.to_string_lossy().to_string());
+        save_repo_config(cfg_root, &repo, &repo_cfg)?;
+    }
+
+    let wt_base = match repo_cfg.worktrees_dir.clone() {
+        Some(w) => w,
+        None => {
+            let picked = prompt_worktrees_dir(&repo)?;
+            std::fs::create_dir_all(&picked)?;
+            repo_cfg.worktrees_dir = Some(picked.to_string_lossy().to_string());
+            save_repo_config(cfg_root, &repo, &repo_cfg)?;
+            picked.to_string_lossy().to_string()
+        }
+    };
+
+    let wt_path = match path {
+        Some(p) => p,
+        None => {
+            let branch_path = sanitize_branch_for_path(branch);
+            PathBuf::from(wt_base).join(branch_path)
+        }
+    };
+    if let Some(parent) = wt_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let branch_exists = repo.git_show_ref_head(branch)?;
+
+    let mut args: Vec<String> = vec!["worktree".into(), "add".into()];
+    if !branch_exists {
+        args.push("-b".into());
+        args.push(branch.to_string());
+    }
+    args.push(wt_path.to_string_lossy().to_string());
+    if branch_exists {
+        args.push(branch.to_string());
+    } else if let Some(base) = base.clone() {
+        args.push(base);
+    }
+
+    repo.run_git_strings(&args)?;
+
+    // Update anchor path to the created worktree so the picker can find it later.
+    repo_cfg.anchor_path = wt_path.to_string_lossy().to_string();
+    save_repo_config(cfg_root, &repo, &repo_cfg)?;
+
+    if !no_hooks {
+        let mut hooks = Vec::new();
+        hooks.extend(global_cfg.hooks);
+        hooks.extend(repo_cfg.hooks);
+        run_hooks(&hooks, &repo, branch, &wt_path)?;
+    }
+
+    Ok(wt_path)
 }
 
 fn remove_worktree(repo_cwd: &Path, path: &Path, yes: bool, force: bool) -> anyhow::Result<()> {

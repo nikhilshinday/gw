@@ -9,5 +9,6 @@ fn init_zsh_prints_wrapper_function() {
         .success()
         .stdout(predicate::str::contains("gw()"))
         .stdout(predicate::str::contains("command gw"))
-        .stdout(predicate::str::contains("gw go"));
+        .stdout(predicate::str::contains("gw go"))
+        .stdout(predicate::str::contains("gw ls"));
 }

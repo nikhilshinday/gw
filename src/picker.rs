@@ -37,6 +37,7 @@ enum Screen {
 enum Mode {
     Normal,
     Filter,
+    ConfirmDelete,
 }
 
 struct AppState {
@@ -44,6 +45,7 @@ struct AppState {
     mode: Mode,
 
     status: String,
+    pending_delete: Option<PathBuf>,
 
     repo_filter: String,
     repo_selected: usize,
@@ -92,6 +94,11 @@ pub(crate) fn pick_worktree(
 
     if repos.is_empty() {
         return Ok(None);
+    }
+
+    // If there's no TTY at all, the picker would hang forever waiting for input.
+    if !io::stdout().is_terminal() && !io::stderr().is_terminal() {
+        anyhow::bail!("no TTY available for interactive picker");
     }
 
     // In shell command-substitution, stdout is a pipe and the TUI would be invisible.
@@ -168,6 +175,7 @@ fn picker_loop<W: Write>(
         screen: Screen::Repo,
         mode: Mode::Normal,
         status: "j/k move, gg/G top/bottom, / filter, enter select, q quit".to_string(),
+        pending_delete: None,
         repo_filter: String::new(),
         repo_selected: 0,
         repo_list_state: ListState::default(),
@@ -340,13 +348,10 @@ fn picker_loop<W: Write>(
                     }
                 }
                 Screen::Worktree => {
-                    if let Some(sel) = handle_worktree_key(&mut state, key, &vis_wt_idx)?
-                        && let Some(repo) = state.active_repo.clone()
+                    if let Some(sel) =
+                        handle_worktree_key(terminal, cfg_root, &mut state, key, &vis_wt_idx)?
                     {
-                        return Ok(Some(PickerSelection {
-                            repo_anchor: repo.anchor,
-                            worktree_path: sel,
-                        }));
+                        return Ok(sel);
                     }
                 }
             }
@@ -437,6 +442,19 @@ fn handle_filter_mode(state: &mut AppState, key: KeyEvent) -> bool {
     }
 }
 
+fn suspend_tui<W: Write>(terminal: &mut Terminal<CrosstermBackend<W>>) {
+    disable_raw_mode().ok();
+    terminal.backend_mut().execute(LeaveAlternateScreen).ok();
+    terminal.show_cursor().ok();
+}
+
+fn resume_tui<W: Write>(terminal: &mut Terminal<CrosstermBackend<W>>) -> anyhow::Result<()> {
+    enable_raw_mode()?;
+    terminal.backend_mut().execute(EnterAlternateScreen)?;
+    terminal.clear().ok();
+    Ok(())
+}
+
 fn handle_repo_key<W: Write>(
     terminal: &mut Terminal<CrosstermBackend<W>>,
     cfg_root: &Path,
@@ -519,19 +537,115 @@ fn handle_repo_key<W: Write>(
     Ok(None)
 }
 
-fn handle_worktree_key(
+fn handle_worktree_key<W: Write>(
+    terminal: &mut Terminal<CrosstermBackend<W>>,
+    cfg_root: &Path,
     state: &mut AppState,
     key: KeyEvent,
     vis_wt_idx: &[usize],
-) -> anyhow::Result<Option<PathBuf>> {
+) -> anyhow::Result<Option<Option<PickerSelection>>> {
+    let Some(repo) = state.active_repo.clone() else {
+        state.screen = Screen::Repo;
+        state.mode = Mode::Normal;
+        state.status = "no active repo".to_string();
+        return Ok(None);
+    };
+
+    // Confirmation mode for delete.
+    if state.mode == Mode::ConfirmDelete {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                let Some(target) = state.pending_delete.take() else {
+                    state.mode = Mode::Normal;
+                    state.status = "no delete target".to_string();
+                    return Ok(None);
+                };
+
+                // We already confirmed in the UI; force yes to avoid dialoguer prompts.
+                crate::remove_worktree(&repo.anchor, &target, true, false)?;
+                state.mode = Mode::Normal;
+                state.status = "worktree removed".to_string();
+                state.wt_entries = load_worktrees(&repo)?;
+                return Ok(None);
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                state.pending_delete = None;
+                state.mode = Mode::Normal;
+                state.status = "delete cancelled".to_string();
+                return Ok(None);
+            }
+            _ => return Ok(None),
+        }
+    }
+
+    // Ctrl+D: delete selected worktree (with confirmation).
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        if let KeyCode::Char('d') = key.code {
+            let i = *vis_wt_idx
+                .get(state.wt_selected)
+                .context("no worktree selected")?;
+            let e = state.wt_entries.get(i).context("no worktree selected")?;
+            let target = PathBuf::from(&e.path);
+            state.pending_delete = Some(target.clone());
+            state.mode = Mode::ConfirmDelete;
+            state.status = format!(
+                "delete {} ? (y/n)",
+                target.to_string_lossy()
+            );
+            return Ok(None);
+        }
+    }
+
     match key.code {
-        KeyCode::Char('q') => return Ok(None),
+        KeyCode::Char('q') => return Ok(Some(None)),
         KeyCode::Esc => {
             state.screen = Screen::Repo;
             state.mode = Mode::Normal;
             state.hotkey_buf.clear();
             state.pending_g = false;
             state.status = "j/k move, gg/G top/bottom, / filter, enter select, q quit".to_string();
+        }
+        KeyCode::Char('n') => {
+            suspend_tui(terminal);
+
+            // Prompt for a new worktree/branch name and create it, then immediately select it.
+            let res: anyhow::Result<Option<PathBuf>> = (|| {
+                use dialoguer::{Input, theme::ColorfulTheme};
+
+                let theme = ColorfulTheme::default();
+                let branch: String = Input::with_theme(&theme)
+                    .with_prompt("New branch/worktree name")
+                    .interact_text()?;
+                let branch = branch.trim().to_string();
+                if branch.is_empty() {
+                    return Ok(None);
+                }
+
+                let wt_path = crate::create_worktree(
+                    &repo.anchor,
+                    cfg_root,
+                    &branch,
+                    None,
+                    None,
+                    None,
+                    false,
+                )?;
+                Ok(Some(wt_path))
+            })();
+
+            resume_tui(terminal)?;
+
+            match res? {
+                Some(wt_path) => {
+                    return Ok(Some(Some(PickerSelection {
+                        repo_anchor: repo.anchor,
+                        worktree_path: wt_path,
+                    })));
+                }
+                None => {
+                    state.status = "new cancelled".to_string();
+                }
+            }
         }
         KeyCode::Char('/') => {
             state.mode = Mode::Filter;
@@ -565,7 +679,10 @@ fn handle_worktree_key(
                 .get(state.wt_selected)
                 .context("no worktree selected")?;
             let e = state.wt_entries.get(i).context("no worktree selected")?;
-            return Ok(Some(PathBuf::from(&e.path)));
+            return Ok(Some(Some(PickerSelection {
+                repo_anchor: repo.anchor,
+                worktree_path: PathBuf::from(&e.path),
+            })));
         }
         KeyCode::Char(c) => {
             if is_worktree_hotkey(c) {

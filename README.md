@@ -79,13 +79,15 @@ gw list
 ### Go (interactive)
 
 ```bash
-gw go
+gw   # or: gw go
 ```
 
 - Repo picker then worktree picker
 - Vim-ish navigation: `j/k`, `gg/G`, `/` to filter, `enter` select, `esc` back, `q` quit
 - Quick select hotkeys: `a/s/d/f/...` (single-key then overflow into two-letter combinations)
-- In worktree list: press `n` to create a new worktree
+- In worktree list:
+  - `n` create a new worktree (prompts for branch name, then selects it)
+  - `Ctrl+D` delete selected worktree (with confirmation; does not delete branch)
 
 ### Hooks
 
