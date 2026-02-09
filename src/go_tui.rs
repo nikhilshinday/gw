@@ -11,7 +11,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use std::collections::HashMap;
-use std::io::{self, Stdout};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -89,14 +89,29 @@ pub(crate) fn run_go(
         return Ok(None);
     }
 
-    let mut stdout = io::stdout();
-    enable_raw_mode()?;
-    stdout.execute(EnterAlternateScreen)?;
+    // In shell command-substitution, stdout is a pipe and the TUI would be invisible.
+    // Draw the UI to stderr in that case, while still printing the selected path to stdout.
+    let use_stderr = !io::stdout().is_terminal() && io::stderr().is_terminal();
+    if use_stderr {
+        run_go_with_terminal(io::stderr(), cfg_root, &repos, current_repo.as_ref())
+    } else {
+        run_go_with_terminal(io::stdout(), cfg_root, &repos, current_repo.as_ref())
+    }
+}
 
-    let backend = CrosstermBackend::new(stdout);
+fn run_go_with_terminal<W: Write>(
+    mut w: W,
+    cfg_root: &Path,
+    repos: &[KnownRepo],
+    current_repo: Option<&RepoContext>,
+) -> anyhow::Result<Option<PathBuf>> {
+    enable_raw_mode()?;
+    w.execute(EnterAlternateScreen)?;
+
+    let backend = CrosstermBackend::new(w);
     let mut terminal = Terminal::new(backend)?;
 
-    let res = tui_loop(&mut terminal, cfg_root, &repos, current_repo.as_ref());
+    let res = tui_loop(&mut terminal, cfg_root, repos, current_repo);
 
     disable_raw_mode().ok();
     terminal.backend_mut().execute(LeaveAlternateScreen).ok();
@@ -138,8 +153,8 @@ fn list_known_repos(cfg_root: &Path) -> anyhow::Result<Vec<KnownRepo>> {
     Ok(repos)
 }
 
-fn tui_loop(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+fn tui_loop<W: Write>(
+    terminal: &mut Terminal<CrosstermBackend<W>>,
     cfg_root: &Path,
     repos: &[KnownRepo],
     current_repo: Option<&RepoContext>,
@@ -420,7 +435,7 @@ fn handle_filter_mode(state: &mut AppState, key: KeyEvent) -> bool {
 }
 
 fn handle_repo_key(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    terminal: &mut Terminal<CrosstermBackend<impl Write>>,
     cfg_root: &Path,
     state: &mut AppState,
     key: KeyEvent,
@@ -506,7 +521,7 @@ fn handle_repo_key(
 }
 
 fn handle_worktree_key(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    terminal: &mut Terminal<CrosstermBackend<impl Write>>,
     cfg_root: &Path,
     state: &mut AppState,
     key: KeyEvent,
