@@ -46,7 +46,7 @@ fn remove_deletes_worktree_path() {
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("gw"));
     cmd.current_dir(&repo)
-        .args(["remove", wt.to_str().unwrap(), "--yes"])
+        .args(["rm", "--path", wt.to_str().unwrap(), "--yes"])
         .assert()
         .success();
 
@@ -74,7 +74,7 @@ fn remove_refuses_to_delete_main_worktree() {
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("gw"));
     cmd.current_dir(&repo)
-        .args(["remove", main, "--yes"])
+        .args(["rm", "--path", main, "--yes"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("refusing"));

@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-mod go_tui;
+mod picker;
 
 #[derive(Parser, Debug)]
 #[command(name = "gw")]
@@ -40,14 +40,11 @@ enum Command {
     },
     /// Interactive picker to jump between repos/worktrees (prints selected path)
     Go,
-    /// Print effective config paths/values for the current repo (if any)
-    Config,
-    /// Show configured hooks (global + per-repo)
-    Hooks,
-    /// Remove a worktree (does not delete branches)
-    Remove {
-        /// Worktree path to remove
-        path: PathBuf,
+    /// Interactive worktree removal: pick repo -> worktree, then remove it (no branch deletion)
+    Rm {
+        /// Worktree path to remove (skips interactive picker)
+        #[arg(long)]
+        path: Option<PathBuf>,
         /// Skip confirmation prompt
         #[arg(long)]
         yes: bool,
@@ -55,6 +52,10 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Print effective config paths/values for the current repo (if any)
+    Config,
+    /// Show configured hooks (global + per-repo)
+    Hooks,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy)]
@@ -78,6 +79,8 @@ gw() {{
     if [[ -n "$dest" ]]; then
       cd "$dest" || return $?
     fi
+  elif [[ "$1" == "rm" ]]; then
+    command gw rm "${{@:2}}"
   else
     command gw "$@"
   fi
@@ -179,12 +182,24 @@ gw() {{
         Command::Go => {
             let repo = RepoContext::detect_from_cwd().ok();
             let cfg_root = config_root()?;
-            let selected = go_tui::run_go(&cfg_root, repo)?;
-            if let Some(p) = selected {
-                println!("{}", p.to_string_lossy());
+            if let Some(sel) = picker::pick_worktree(&cfg_root, repo)? {
+                println!("{}", sel.worktree_path.to_string_lossy());
             } else {
                 // Shell wrapper should treat this as cancel.
                 std::process::exit(1);
+            }
+        }
+        Command::Rm { path, yes, force } => {
+            if let Some(path) = path {
+                let repo = RepoContext::detect_from_cwd()?;
+                remove_worktree(&repo.toplevel, &path, yes, force)?;
+            } else {
+                let repo = RepoContext::detect_from_cwd().ok();
+                let cfg_root = config_root()?;
+                let Some(sel) = picker::pick_worktree(&cfg_root, repo)? else {
+                    std::process::exit(1);
+                };
+                remove_worktree(&sel.repo_anchor, &sel.worktree_path, yes, force)?;
             }
         }
         Command::Config => {
@@ -220,56 +235,59 @@ gw() {{
                 }
             }
         }
-        Command::Remove { path, yes, force } => {
-            let repo = RepoContext::detect_from_cwd()?;
+    }
 
-            let out = std::process::Command::new("git")
-                .args(["worktree", "list", "--porcelain"])
-                .output()?;
-            if !out.status.success() {
-                anyhow::bail!(
-                    "git worktree list failed: {}",
-                    String::from_utf8_lossy(&out.stderr)
-                );
-            }
+    Ok(())
+}
 
-            let entries = parse_worktree_porcelain(&String::from_utf8(out.stdout)?);
-            let main_path = entries
-                .first()
-                .map(|e| PathBuf::from(&e.path))
-                .unwrap_or(repo.toplevel.clone());
+fn remove_worktree(repo_cwd: &Path, path: &Path, yes: bool, force: bool) -> anyhow::Result<()> {
+    let repo = RepoContext::detect_from_path(repo_cwd)?;
 
-            let target = std::fs::canonicalize(&path).unwrap_or(path.clone());
-            let main = std::fs::canonicalize(&main_path).unwrap_or(main_path);
+    let out = std::process::Command::new("git")
+        .current_dir(&repo.toplevel)
+        .args(["worktree", "list", "--porcelain"])
+        .output()?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "git worktree list failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 
-            if target == main {
-                anyhow::bail!(
-                    "refusing to remove main worktree: {}",
-                    target.to_string_lossy()
-                );
-            }
+    let entries = parse_worktree_porcelain(&String::from_utf8(out.stdout)?);
+    let main_path = entries
+        .first()
+        .map(|e| PathBuf::from(&e.path))
+        .unwrap_or(repo.toplevel.clone());
 
-            if !yes {
-                let prompt = format!("Remove worktree at {}?", target.to_string_lossy());
-                let ok = dialoguer::Confirm::new()
-                    .with_prompt(prompt)
-                    .default(false)
-                    .interact()?;
-                if !ok {
-                    std::process::exit(1);
-                }
-            }
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let main = std::fs::canonicalize(&main_path).unwrap_or(main_path);
 
-            let mut args: Vec<String> = vec!["worktree".into(), "remove".into()];
-            if force {
-                args.push("--force".into());
-            }
-            args.push(target.to_string_lossy().to_string());
+    if target == main {
+        anyhow::bail!(
+            "refusing to remove main worktree: {}",
+            target.to_string_lossy()
+        );
+    }
 
-            repo.run_git_strings(&args)?;
+    if !yes {
+        let prompt = format!("Remove worktree at {}?", target.to_string_lossy());
+        let ok = dialoguer::Confirm::new()
+            .with_prompt(prompt)
+            .default(false)
+            .interact()?;
+        if !ok {
+            std::process::exit(1);
         }
     }
 
+    let mut args: Vec<String> = vec!["worktree".into(), "remove".into()];
+    if force {
+        args.push("--force".into());
+    }
+    args.push(target.to_string_lossy().to_string());
+
+    repo.run_git_strings(&args)?;
     Ok(())
 }
 

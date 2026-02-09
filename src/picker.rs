@@ -16,9 +16,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::{
-    Hook, RepoConfig, RepoContext, WorktreeEntry, assign_hotkeys, load_global_config,
-    load_repo_config, parse_worktree_porcelain, prompt_worktrees_dir, run_hooks,
-    sanitize_branch_for_path, save_repo_config,
+    RepoConfig, RepoContext, WorktreeEntry, assign_hotkeys, load_repo_config,
+    parse_worktree_porcelain, save_repo_config,
 };
 
 #[derive(Debug, Clone)]
@@ -64,10 +63,16 @@ struct AppState {
     last_g_at: Instant,
 }
 
-pub(crate) fn run_go(
+#[derive(Debug, Clone)]
+pub(crate) struct PickerSelection {
+    pub(crate) repo_anchor: PathBuf,
+    pub(crate) worktree_path: PathBuf,
+}
+
+pub(crate) fn pick_worktree(
     cfg_root: &Path,
     current_repo: Option<RepoContext>,
-) -> anyhow::Result<Option<PathBuf>> {
+) -> anyhow::Result<Option<PickerSelection>> {
     let mut repos = list_known_repos(cfg_root)?;
 
     // If invoked inside a repo and it's not known yet, add it (persisting a stub config).
@@ -90,28 +95,28 @@ pub(crate) fn run_go(
     }
 
     // In shell command-substitution, stdout is a pipe and the TUI would be invisible.
-    // Draw the UI to stderr in that case, while still printing the selected path to stdout.
+    // Draw the UI to stderr in that case.
     let use_stderr = !io::stdout().is_terminal() && io::stderr().is_terminal();
     if use_stderr {
-        run_go_with_terminal(io::stderr(), cfg_root, &repos, current_repo.as_ref())
+        pick_with_terminal(io::stderr(), cfg_root, &repos, current_repo.as_ref())
     } else {
-        run_go_with_terminal(io::stdout(), cfg_root, &repos, current_repo.as_ref())
+        pick_with_terminal(io::stdout(), cfg_root, &repos, current_repo.as_ref())
     }
 }
 
-fn run_go_with_terminal<W: Write>(
+fn pick_with_terminal<W: Write>(
     mut w: W,
     cfg_root: &Path,
     repos: &[KnownRepo],
     current_repo: Option<&RepoContext>,
-) -> anyhow::Result<Option<PathBuf>> {
+) -> anyhow::Result<Option<PickerSelection>> {
     enable_raw_mode()?;
     w.execute(EnterAlternateScreen)?;
 
     let backend = CrosstermBackend::new(w);
     let mut terminal = Terminal::new(backend)?;
 
-    let res = tui_loop(&mut terminal, cfg_root, repos, current_repo);
+    let res = picker_loop(&mut terminal, cfg_root, repos, current_repo);
 
     disable_raw_mode().ok();
     terminal.backend_mut().execute(LeaveAlternateScreen).ok();
@@ -153,12 +158,12 @@ fn list_known_repos(cfg_root: &Path) -> anyhow::Result<Vec<KnownRepo>> {
     Ok(repos)
 }
 
-fn tui_loop<W: Write>(
+fn picker_loop<W: Write>(
     terminal: &mut Terminal<CrosstermBackend<W>>,
     cfg_root: &Path,
     repos: &[KnownRepo],
     current_repo: Option<&RepoContext>,
-) -> anyhow::Result<Option<PathBuf>> {
+) -> anyhow::Result<Option<PickerSelection>> {
     let mut state = AppState {
         screen: Screen::Repo,
         mode: Mode::Normal,
@@ -177,11 +182,10 @@ fn tui_loop<W: Write>(
         last_g_at: Instant::now(),
     };
 
-    if let Some(cur) = current_repo {
-        // repos list is sorted by name already
-        if let Some(idx) = repos.iter().position(|r| r.hash == cur.repo_hash) {
-            state.repo_selected = idx;
-        }
+    if let Some(cur) = current_repo
+        && let Some(idx) = repos.iter().position(|r| r.hash == cur.repo_hash)
+    {
+        state.repo_selected = idx;
     }
 
     loop {
@@ -214,8 +218,8 @@ fn tui_loop<W: Write>(
                 .split(size);
 
             let title = match state.screen {
-                Screen::Repo => "gw go: repos",
-                Screen::Worktree => "gw go: worktrees",
+                Screen::Repo => "gw: repos",
+                Screen::Worktree => "gw: worktrees",
             };
 
             let filter_txt = match state.screen {
@@ -294,11 +298,7 @@ fn tui_loop<W: Write>(
                         })
                         .collect();
                     let list = List::new(items)
-                        .block(
-                            Block::default()
-                                .borders(Borders::ALL)
-                                .title("Worktrees (n = new, x = delete)"),
-                        )
+                        .block(Block::default().borders(Borders::ALL).title("Worktrees"))
                         .highlight_style(
                             Style::default()
                                 .bg(Color::Blue)
@@ -327,7 +327,7 @@ fn tui_loop<W: Write>(
 
             match state.screen {
                 Screen::Repo => {
-                    if let Some(out) = handle_repo_key(
+                    if let Some(sel) = handle_repo_key(
                         terminal,
                         cfg_root,
                         &mut state,
@@ -336,14 +336,17 @@ fn tui_loop<W: Write>(
                         &repo_codes,
                         &repo_code_map,
                     )? {
-                        return Ok(out);
+                        return Ok(sel);
                     }
                 }
                 Screen::Worktree => {
-                    if let Some(out) =
-                        handle_worktree_key(terminal, cfg_root, &mut state, key, &vis_wt_idx)?
+                    if let Some(sel) = handle_worktree_key(&mut state, key, &vis_wt_idx)?
+                        && let Some(repo) = state.active_repo.clone()
                     {
-                        return Ok(out);
+                        return Ok(Some(PickerSelection {
+                            repo_anchor: repo.anchor,
+                            worktree_path: sel,
+                        }));
                     }
                 }
             }
@@ -434,15 +437,15 @@ fn handle_filter_mode(state: &mut AppState, key: KeyEvent) -> bool {
     }
 }
 
-fn handle_repo_key(
-    terminal: &mut Terminal<CrosstermBackend<impl Write>>,
+fn handle_repo_key<W: Write>(
+    terminal: &mut Terminal<CrosstermBackend<W>>,
     cfg_root: &Path,
     state: &mut AppState,
     key: KeyEvent,
     vis_repos: &[&KnownRepo],
     repo_codes: &[String],
     repo_code_map: &HashMap<String, usize>,
-) -> anyhow::Result<Option<Option<PathBuf>>> {
+) -> anyhow::Result<Option<Option<PickerSelection>>> {
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => return Ok(Some(None)),
         KeyCode::Char('/') => {
@@ -483,10 +486,9 @@ fn handle_repo_key(
             state.wt_selected = 0;
             state.hotkey_buf.clear();
             state.pending_g = false;
-            state.status = "j/k move, / filter, enter select, esc back, n new".to_string();
+            state.status = "j/k move, / filter, enter select, esc back".to_string();
             state.wt_entries = load_worktrees(repo)?;
 
-            // Best-effort refresh: if we can detect this repo context, update its anchor.
             if let Ok(ctx) = RepoContext::detect_from_path(&repo.anchor)
                 && let Some(mut cfg) = load_repo_config(cfg_root, &ctx)
             {
@@ -494,22 +496,19 @@ fn handle_repo_key(
                 let _ = save_repo_config(cfg_root, &ctx, &cfg);
             }
 
-            // If terminal got resized / state stale, force redraw.
             terminal.clear().ok();
         }
         KeyCode::Char(c) => {
             if is_repo_hotkey(c) {
                 push_hotkey(state, c);
 
-                if let Some(sel) = resolve_hotkey_exact(&state.hotkey_buf, repo_code_map) {
+                if let Some(sel) = repo_code_map.get(&state.hotkey_buf).copied() {
                     state.repo_selected = sel;
                     if state.hotkey_buf.len() >= 2 {
                         state.hotkey_buf.clear();
                     }
-                } else if !has_prefix(&state.hotkey_buf, repo_codes) {
-                    state.hotkey_buf.clear();
-                } else if state.hotkey_buf.len() >= 2 {
-                    // valid prefix but no exact match; reset after two chars
+                } else if !has_prefix(&state.hotkey_buf, repo_codes) || state.hotkey_buf.len() >= 2
+                {
                     state.hotkey_buf.clear();
                 }
             }
@@ -521,14 +520,12 @@ fn handle_repo_key(
 }
 
 fn handle_worktree_key(
-    terminal: &mut Terminal<CrosstermBackend<impl Write>>,
-    cfg_root: &Path,
     state: &mut AppState,
     key: KeyEvent,
     vis_wt_idx: &[usize],
-) -> anyhow::Result<Option<Option<PathBuf>>> {
+) -> anyhow::Result<Option<PathBuf>> {
     match key.code {
-        KeyCode::Char('q') => return Ok(Some(None)),
+        KeyCode::Char('q') => return Ok(None),
         KeyCode::Esc => {
             state.screen = Screen::Repo;
             state.mode = Mode::Normal;
@@ -568,67 +565,7 @@ fn handle_worktree_key(
                 .get(state.wt_selected)
                 .context("no worktree selected")?;
             let e = state.wt_entries.get(i).context("no worktree selected")?;
-            return Ok(Some(Some(PathBuf::from(&e.path))));
-        }
-        KeyCode::Char('n') => {
-            let repo = state.active_repo.clone().context("no active repo")?;
-
-            // Temporarily exit TUI to run dialoguer prompts.
-            disable_raw_mode().ok();
-            terminal.backend_mut().execute(LeaveAlternateScreen).ok();
-
-            let created = create_new_worktree_interactive(cfg_root, &repo);
-
-            terminal.backend_mut().execute(EnterAlternateScreen).ok();
-            enable_raw_mode().ok();
-
-            if let Ok(Some(created)) = created {
-                state.wt_entries = load_worktrees(&repo)?;
-                if let Some(idx) = state
-                    .wt_entries
-                    .iter()
-                    .position(|e| PathBuf::from(&e.path) == created)
-                {
-                    state.wt_selected = idx;
-                }
-                state.status = "worktree created; enter to select".to_string();
-            } else if let Err(e) = created {
-                state.status = format!("new worktree failed: {e}");
-            }
-
-            terminal.clear().ok();
-        }
-        KeyCode::Char('x') => {
-            let repo = state.active_repo.clone().context("no active repo")?;
-
-            let i = *vis_wt_idx
-                .get(state.wt_selected)
-                .context("no worktree selected")?;
-            let e = state.wt_entries.get(i).context("no worktree selected")?;
-            let target = PathBuf::from(&e.path);
-
-            // Temporarily exit TUI for confirmation prompt.
-            disable_raw_mode().ok();
-            terminal.backend_mut().execute(LeaveAlternateScreen).ok();
-
-            let removed = delete_worktree_interactive(&repo, &target);
-
-            terminal.backend_mut().execute(EnterAlternateScreen).ok();
-            enable_raw_mode().ok();
-
-            if let Ok(true) = removed {
-                state.wt_entries = load_worktrees(&repo)?;
-                state.wt_selected = state
-                    .wt_selected
-                    .min(state.wt_entries.len().saturating_sub(1));
-                state.status = "worktree removed".to_string();
-            } else if let Ok(false) = removed {
-                state.status = "cancelled".to_string();
-            } else if let Err(err) = removed {
-                state.status = format!("remove failed: {err}");
-            }
-
-            terminal.clear().ok();
+            return Ok(Some(PathBuf::from(&e.path)));
         }
         KeyCode::Char(c) => {
             if is_worktree_hotkey(c) {
@@ -641,7 +578,7 @@ fn handle_worktree_key(
 
                 push_hotkey(state, c);
 
-                if let Some(sel) = resolve_hotkey_exact(&state.hotkey_buf, &map) {
+                if let Some(sel) = map.get(&state.hotkey_buf).copied() {
                     state.wt_selected = sel;
                     if state.hotkey_buf.len() >= 2 {
                         state.hotkey_buf.clear();
@@ -673,130 +610,6 @@ fn load_worktrees(repo: &KnownRepo) -> anyhow::Result<Vec<WorktreeEntry>> {
     Ok(parse_worktree_porcelain(&txt))
 }
 
-fn create_new_worktree_interactive(
-    cfg_root: &Path,
-    repo: &KnownRepo,
-) -> anyhow::Result<Option<PathBuf>> {
-    use dialoguer::{Input, theme::ColorfulTheme};
-
-    let theme = ColorfulTheme::default();
-
-    let branch: String = Input::with_theme(&theme)
-        .with_prompt("Branch name")
-        .interact_text()?;
-    let branch = branch.trim().to_string();
-    if branch.is_empty() {
-        return Ok(None);
-    }
-
-    let base: String = Input::with_theme(&theme)
-        .with_prompt("Base ref (blank for HEAD)")
-        .allow_empty(true)
-        .interact_text()?;
-    let base = base.trim().to_string();
-
-    let ctx = RepoContext::detect_from_path(&repo.anchor)?;
-
-    let global_cfg = load_global_config(cfg_root)?;
-    let mut repo_cfg = load_repo_config(cfg_root, &ctx).unwrap_or(RepoConfig {
-        repo_name: ctx.repo_name.clone(),
-        git_common_dir: ctx.git_common_dir.to_string_lossy().to_string(),
-        anchor_path: ctx.toplevel.to_string_lossy().to_string(),
-        worktrees_dir: None,
-        hooks: Vec::new(),
-    });
-
-    let wt_base = match repo_cfg.worktrees_dir.clone() {
-        Some(w) => PathBuf::from(w),
-        None => {
-            let picked = prompt_worktrees_dir(&ctx)?;
-            std::fs::create_dir_all(&picked)?;
-            repo_cfg.worktrees_dir = Some(picked.to_string_lossy().to_string());
-            save_repo_config(cfg_root, &ctx, &repo_cfg)?;
-            picked
-        }
-    };
-
-    let wt_path = wt_base.join(sanitize_branch_for_path(&branch));
-    if let Some(parent) = wt_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let branch_exists = ctx.git_show_ref_head(&branch)?;
-
-    let mut args: Vec<String> = vec!["worktree".into(), "add".into()];
-    if !branch_exists {
-        args.push("-b".into());
-        args.push(branch.clone());
-    }
-    args.push(wt_path.to_string_lossy().to_string());
-    if branch_exists {
-        args.push(branch.clone());
-    } else if !base.is_empty() {
-        args.push(base);
-    }
-
-    ctx.run_git_strings(&args)?;
-
-    let mut hooks: Vec<Hook> = Vec::new();
-    hooks.extend(global_cfg.hooks);
-    hooks.extend(repo_cfg.hooks);
-    run_hooks(&hooks, &ctx, &branch, &wt_path)?;
-
-    Ok(Some(wt_path))
-}
-
-fn delete_worktree_interactive(repo: &KnownRepo, target: &Path) -> anyhow::Result<bool> {
-    use dialoguer::{Confirm, theme::ColorfulTheme};
-
-    let theme = ColorfulTheme::default();
-
-    let out = std::process::Command::new("git")
-        .current_dir(&repo.anchor)
-        .args(["worktree", "list", "--porcelain"])
-        .output()?;
-    if !out.status.success() {
-        anyhow::bail!(
-            "git worktree list failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-
-    let entries = parse_worktree_porcelain(&String::from_utf8(out.stdout)?);
-    let main_path = entries
-        .first()
-        .map(|e| PathBuf::from(&e.path))
-        .unwrap_or_else(|| repo.anchor.clone());
-
-    let target = std::fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
-    let main = std::fs::canonicalize(&main_path).unwrap_or(main_path);
-
-    if target == main {
-        anyhow::bail!(
-            "refusing to remove main worktree: {}",
-            target.to_string_lossy()
-        );
-    }
-
-    let ok = Confirm::with_theme(&theme)
-        .with_prompt(format!("Remove worktree at {}?", target.to_string_lossy()))
-        .default(false)
-        .interact()?;
-    if !ok {
-        return Ok(false);
-    }
-
-    let status = std::process::Command::new("git")
-        .current_dir(&repo.anchor)
-        .args(["worktree", "remove", target.to_string_lossy().as_ref()])
-        .status()?;
-    if !status.success() {
-        anyhow::bail!("git worktree remove failed");
-    }
-
-    Ok(true)
-}
-
 fn clear_hotkey_buf(state: &mut AppState) {
     state.hotkey_buf.clear();
 }
@@ -814,10 +627,6 @@ fn push_hotkey(state: &mut AppState, c: char) {
     state.last_hotkey_at = Instant::now();
 }
 
-fn resolve_hotkey_exact(buf: &str, map: &HashMap<String, usize>) -> Option<usize> {
-    map.get(buf).copied()
-}
-
 fn has_prefix(buf: &str, codes: &[String]) -> bool {
     codes.iter().any(|c| c.starts_with(buf))
 }
@@ -831,7 +640,6 @@ fn is_worktree_hotkey(c: char) -> bool {
 }
 
 fn hotkey_pool_repos() -> Vec<char> {
-    // semicolon omitted; reserved keys: j/k, g (gg), q, /, enter, esc.
     vec![
         'a', 's', 'd', 'f', 'h', 'l', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', 'z', 'x', 'c',
         'v', 'b', 'n', 'm',
@@ -839,7 +647,6 @@ fn hotkey_pool_repos() -> Vec<char> {
 }
 
 fn hotkey_pool_worktrees() -> Vec<char> {
-    // In worktree list, reserve `n` for creating a new worktree.
     vec![
         'a', 's', 'd', 'f', 'h', 'l', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', 'z', 'x', 'c',
         'v', 'b', 'm',
