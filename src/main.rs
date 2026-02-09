@@ -44,6 +44,17 @@ enum Command {
     Config,
     /// Show configured hooks (global + per-repo)
     Hooks,
+    /// Remove a worktree (does not delete branches)
+    Remove {
+        /// Worktree path to remove
+        path: PathBuf,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+        /// Also remove untracked files/dirs in that worktree (passes `--force` to git)
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy)]
@@ -208,6 +219,54 @@ gw() {{
                     println!("repo: {}", h.command);
                 }
             }
+        }
+        Command::Remove { path, yes, force } => {
+            let repo = RepoContext::detect_from_cwd()?;
+
+            let out = std::process::Command::new("git")
+                .args(["worktree", "list", "--porcelain"])
+                .output()?;
+            if !out.status.success() {
+                anyhow::bail!(
+                    "git worktree list failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+
+            let entries = parse_worktree_porcelain(&String::from_utf8(out.stdout)?);
+            let main_path = entries
+                .first()
+                .map(|e| PathBuf::from(&e.path))
+                .unwrap_or(repo.toplevel.clone());
+
+            let target = std::fs::canonicalize(&path).unwrap_or(path.clone());
+            let main = std::fs::canonicalize(&main_path).unwrap_or(main_path);
+
+            if target == main {
+                anyhow::bail!(
+                    "refusing to remove main worktree: {}",
+                    target.to_string_lossy()
+                );
+            }
+
+            if !yes {
+                let prompt = format!("Remove worktree at {}?", target.to_string_lossy());
+                let ok = dialoguer::Confirm::new()
+                    .with_prompt(prompt)
+                    .default(false)
+                    .interact()?;
+                if !ok {
+                    std::process::exit(1);
+                }
+            }
+
+            let mut args: Vec<String> = vec!["worktree".into(), "remove".into()];
+            if force {
+                args.push("--force".into());
+            }
+            args.push(target.to_string_lossy().to_string());
+
+            repo.run_git_strings(&args)?;
         }
     }
 

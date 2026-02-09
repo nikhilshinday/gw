@@ -297,7 +297,7 @@ fn tui_loop<W: Write>(
                         .block(
                             Block::default()
                                 .borders(Borders::ALL)
-                                .title("Worktrees (n = new)"),
+                                .title("Worktrees (n = new, x = delete)"),
                         )
                         .highlight_style(
                             Style::default()
@@ -598,6 +598,38 @@ fn handle_worktree_key(
 
             terminal.clear().ok();
         }
+        KeyCode::Char('x') => {
+            let repo = state.active_repo.clone().context("no active repo")?;
+
+            let i = *vis_wt_idx
+                .get(state.wt_selected)
+                .context("no worktree selected")?;
+            let e = state.wt_entries.get(i).context("no worktree selected")?;
+            let target = PathBuf::from(&e.path);
+
+            // Temporarily exit TUI for confirmation prompt.
+            disable_raw_mode().ok();
+            terminal.backend_mut().execute(LeaveAlternateScreen).ok();
+
+            let removed = delete_worktree_interactive(&repo, &target);
+
+            terminal.backend_mut().execute(EnterAlternateScreen).ok();
+            enable_raw_mode().ok();
+
+            if let Ok(true) = removed {
+                state.wt_entries = load_worktrees(&repo)?;
+                state.wt_selected = state
+                    .wt_selected
+                    .min(state.wt_entries.len().saturating_sub(1));
+                state.status = "worktree removed".to_string();
+            } else if let Ok(false) = removed {
+                state.status = "cancelled".to_string();
+            } else if let Err(err) = removed {
+                state.status = format!("remove failed: {err}");
+            }
+
+            terminal.clear().ok();
+        }
         KeyCode::Char(c) => {
             if is_worktree_hotkey(c) {
                 let pool = hotkey_pool_worktrees();
@@ -712,6 +744,57 @@ fn create_new_worktree_interactive(
     run_hooks(&hooks, &ctx, &branch, &wt_path)?;
 
     Ok(Some(wt_path))
+}
+
+fn delete_worktree_interactive(repo: &KnownRepo, target: &Path) -> anyhow::Result<bool> {
+    use dialoguer::{Confirm, theme::ColorfulTheme};
+
+    let theme = ColorfulTheme::default();
+
+    let out = std::process::Command::new("git")
+        .current_dir(&repo.anchor)
+        .args(["worktree", "list", "--porcelain"])
+        .output()?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "git worktree list failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let entries = parse_worktree_porcelain(&String::from_utf8(out.stdout)?);
+    let main_path = entries
+        .first()
+        .map(|e| PathBuf::from(&e.path))
+        .unwrap_or_else(|| repo.anchor.clone());
+
+    let target = std::fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
+    let main = std::fs::canonicalize(&main_path).unwrap_or(main_path);
+
+    if target == main {
+        anyhow::bail!(
+            "refusing to remove main worktree: {}",
+            target.to_string_lossy()
+        );
+    }
+
+    let ok = Confirm::with_theme(&theme)
+        .with_prompt(format!("Remove worktree at {}?", target.to_string_lossy()))
+        .default(false)
+        .interact()?;
+    if !ok {
+        return Ok(false);
+    }
+
+    let status = std::process::Command::new("git")
+        .current_dir(&repo.anchor)
+        .args(["worktree", "remove", target.to_string_lossy().as_ref()])
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("git worktree remove failed");
+    }
+
+    Ok(true)
 }
 
 fn clear_hotkey_buf(state: &mut AppState) {
