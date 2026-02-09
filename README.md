@@ -50,7 +50,10 @@ Add this to `~/.zshrc`:
 eval "$(gw init zsh)"
 ```
 
-This lets `gw go` change your current shell directory.
+Restart your shell (or `source ~/.zshrc`) after adding it.
+
+This wrapper is what lets `gw` / `gw go` / `gw ls` **change your current shell directory**.
+Without it, `gw` will just print the selected worktree path (since a subprocess can't `cd` your parent shell).
 
 ## Usage
 

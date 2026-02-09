@@ -14,6 +14,10 @@ This file tracks work performed by an automated coding agent in this repo, so hu
   - `Ctrl+D` deletes the selected worktree with an in-picker confirmation (`y/n`); branch is preserved.
 - Prevented hangs when no TTY is available by failing fast with a clear error.
 
+### README: clarified zshrc eval requirement for `cd`
+
+- Clarified that `eval "$(gw init zsh)"` should live in `~/.zshrc` and is required for `gw` to `cd` the current shell; otherwise it prints the selected path.
+
 Verification:
 - `cargo test`
 
