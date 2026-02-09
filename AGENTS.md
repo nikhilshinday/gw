@@ -9,6 +9,11 @@ This file tracks work performed by an automated coding agent in this repo, so hu
 - Added `STEERING.md` to persist human steering/preferences for this repo.
 - Added `skills/steering-by-user/SKILL.md` describing a lightweight workflow to turn in-context user steering into explicit, durable rules and apply them consistently.
 
+### Skills: keep steering skill repo-local; log soft preferences too
+
+- Removed the out-of-repo install of `steering-by-user` under `~/.codex/skills`; the skill now lives only in this codebase under `skills/steering-by-user/`.
+- Broadened the skill trigger criteria so even suggestions/soft preferences get logged and consolidated into `STEERING.md`.
+
 ### Picker-First UX: `gw` opens TUI; `ls` alias; new/delete in-picker
 
 - Made `gw` with no args launch the interactive repo/worktree picker (same behavior as `gw go`).

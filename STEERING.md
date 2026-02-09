@@ -4,7 +4,7 @@ This file captures durable steering from the human so it can be applied consiste
 
 ## Interaction Preferences
 
-- TBD
+- Log and consolidate even soft preferences/suggestions: if I say “prefer”, “maybe”, or make a suggestion, treat it as steering worth capturing.
 
 ## Engineering Preferences
 
@@ -21,4 +21,3 @@ This file captures durable steering from the human so it can be applied consiste
 ## Examples
 
 - TBD
-
