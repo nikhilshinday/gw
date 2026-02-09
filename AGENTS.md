@@ -4,6 +4,11 @@ This file tracks work performed by an automated coding agent in this repo, so hu
 
 ## Work Summary (2026-02-09)
 
+### Skills: captured durable steering workflow
+
+- Added `STEERING.md` to persist human steering/preferences for this repo.
+- Added `skills/steering-by-user/SKILL.md` describing a lightweight workflow to turn in-context user steering into explicit, durable rules and apply them consistently.
+
 ### Picker-First UX: `gw` opens TUI; `ls` alias; new/delete in-picker
 
 - Made `gw` with no args launch the interactive repo/worktree picker (same behavior as `gw go`).
