@@ -1,16 +1,46 @@
 # gw
 
-A small CLI to manage git worktrees with per-repo configuration.
+It's 2026, the takeoff is loud, and "running one agent" is the new "opening one browser tab".
+If you're shipping with multiple AI agents, you're basically babysitting a small team that never sleeps.
+
+`gw` helps you do that safely: it makes spinning up isolated git worktrees (one per agent/task), jumping between them, and cleaning them up fast enough that you actually use worktrees instead of promising yourself you will.
+
+## Value Prop (Why this exists)
+
+If you context-switch a lot (or delegate work to multiple agents), you need **cheap isolation** and **fast navigation**:
+
+- **One worktree per agent/task**: avoid dependency/build-output bleed, branch collisions, and "wait, which folder is this?"
+- **Consistent per-repo worktree locations** with config persisted under `~/.config/gw`
+- **Interactive cross-repo picker** (`gw go`) so you can jump to the right sandbox in seconds
+- **Hooks on creation** to bootstrap a worktree (install deps, generate files, run checks) consistently
+- **Easy cleanup** (`gw rm`) so worktrees don't turn into a graveyard
+
+Under the hood, it's a thin wrapper around `git worktree` with ergonomics designed for high-frequency use.
 
 ## Install
 
-Recommended (available everywhere):
+### Homebrew (tap)
 
 ```bash
-cargo install --path /path/to/tools
+brew tap nikhilshinday/tools
+brew install gw
+```
+
+Note: this currently builds from source (so you will need Rust; Homebrew will install it as a build dependency).
+
+### Cargo (recommended, available everywhere)
+
+```bash
+cargo install --git https://github.com/nikhilshinday/gw --locked
 ```
 
 That puts `gw` in `~/.cargo/bin`.
+
+If you're hacking on the repo locally:
+
+```bash
+cargo install --path . --locked
+```
 
 ## Shell Integration (zsh)
 
