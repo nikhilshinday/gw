@@ -4,7 +4,11 @@ This file tracks work performed by an automated coding agent in this repo, so hu
 
 ## Durable Agent Instructions
 
-- After making changes intended to be kept, bump the semver in `Cargo.toml` (patch by default), run `cargo test`, commit, and push.
+- After making changes intended to be kept:
+- Bump the semver in `Cargo.toml` (patch by default).
+- Run `cargo test`.
+- Reinstall the command locally: `cargo install --path . --locked --force`.
+- Commit and push.
 
 ## Work Summary (2026-02-09)
 
