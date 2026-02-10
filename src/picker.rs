@@ -321,8 +321,8 @@ fn picker_loop<W: Write>(
                 }
             }
 
-            let footer =
-                Paragraph::new(state.status.clone()).block(Block::default().borders(Borders::ALL));
+            let footer = Paragraph::new(footer_text(&state.status, state.screen, state.mode))
+                .block(Block::default().borders(Borders::ALL));
             f.render_widget(footer, chunks[2]);
 
             if state.mode == Mode::Help {
@@ -349,12 +349,7 @@ fn picker_loop<W: Write>(
                 match key.code {
                     KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') => {
                         state.mode = Mode::Normal;
-                        state.status = match state.screen {
-                            Screen::Repo => "j/k move, gg/G top/bottom, / filter, enter select, n new, ? help, q quit"
-                                .to_string(),
-                            Screen::Worktree => "j/k move, / filter, enter select, n new, ctrl+d delete, esc back, ? help, q quit"
-                                .to_string(),
-                        };
+                        state.status.clear();
                     }
                     _ => {}
                 }
@@ -883,6 +878,28 @@ fn reset_chords(state: &mut AppState) {
     state.pending_g = false;
 }
 
+fn command_hint(screen: Screen, mode: Mode) -> &'static str {
+    match mode {
+        Mode::Filter => "commands: type to filter, enter apply, esc cancel",
+        Mode::ConfirmDelete => "commands: y confirm delete, n/esc cancel",
+        Mode::Help => "commands: ?/esc/q close help",
+        Mode::Normal => match screen {
+            Screen::Repo => "commands: j/k move, gg/G top/bottom, / filter, enter open, n new, ? help, q/esc quit",
+            Screen::Worktree => "commands: j/k move, gg/G top/bottom, / filter, enter select, n new, ctrl+d delete, esc back, ? help, q quit",
+        },
+    }
+}
+
+fn footer_text(status: &str, screen: Screen, mode: Mode) -> String {
+    let hint = command_hint(screen, mode);
+    let status = status.trim();
+    if status.is_empty() {
+        hint.to_string()
+    } else {
+        format!("{status}\n{hint}")
+    }
+}
+
 fn persist_repo_anchor(cfg_root: &Path, repo_hash: &str, anchor: &Path) {
     let cfg_path = cfg_root
         .join("repos")
@@ -1060,6 +1077,18 @@ mod tests {
 
         let repaired = crate::load_repo_config(&cfg_root, &ctx).unwrap();
         assert_eq!(repaired.anchor_path, new_anchor.to_string_lossy().as_ref());
+    }
+
+    #[test]
+    fn footer_text_always_includes_command_hint() {
+        // spec: GW-PICK-104
+        let txt = footer_text("hello", Screen::Repo, Mode::Normal);
+        assert!(txt.contains("hello"));
+        assert!(txt.contains("commands:"));
+
+        let txt = footer_text("", Screen::Worktree, Mode::Help);
+        assert!(txt.contains("commands:"));
+        assert!(txt.contains("close help"));
     }
 }
 

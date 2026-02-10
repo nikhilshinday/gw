@@ -2,6 +2,10 @@
 
 This file tracks work performed by an automated coding agent in this repo, so humans can quickly see what changed, why, and how it was validated.
 
+## Durable Agent Instructions
+
+- After making changes intended to be kept, bump the semver in `Cargo.toml` (patch by default), run `cargo test`, commit, and push.
+
 ## Work Summary (2026-02-09)
 
 ### Skills: captured durable steering workflow
