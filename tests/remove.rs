@@ -79,3 +79,97 @@ fn remove_refuses_to_delete_main_worktree() {
         .failure()
         .stderr(predicate::str::contains("refusing"));
 }
+
+#[test]
+fn remove_accepts_positional_path() {
+    let td = TempDir::new().unwrap();
+    let repo = td.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+
+    run_git(&repo, &["init"]);
+    run_git(&repo, &["config", "user.email", "gw@example.com"]);
+    run_git(&repo, &["config", "user.name", "gw"]);
+
+    std::fs::write(repo.join("README.md"), "hi\n").unwrap();
+    run_git(&repo, &["add", "."]);
+    run_git(&repo, &["commit", "-m", "init"]);
+
+    let wt = td.path().join("wt");
+    run_git(
+        &repo,
+        &["worktree", "add", "-b", "feat", wt.to_str().unwrap()],
+    );
+    assert!(wt.exists());
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("gw"));
+    cmd.current_dir(&repo)
+        .args(["rm", wt.to_str().unwrap(), "--yes"])
+        .assert()
+        .success();
+
+    assert!(!wt.exists());
+}
+
+#[test]
+fn remove_dot_deletes_current_worktree() {
+    let td = TempDir::new().unwrap();
+    let repo = td.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+
+    run_git(&repo, &["init"]);
+    run_git(&repo, &["config", "user.email", "gw@example.com"]);
+    run_git(&repo, &["config", "user.name", "gw"]);
+
+    std::fs::write(repo.join("README.md"), "hi\n").unwrap();
+    run_git(&repo, &["add", "."]);
+    run_git(&repo, &["commit", "-m", "init"]);
+
+    let wt = td.path().join("wt");
+    run_git(
+        &repo,
+        &["worktree", "add", "-b", "feat", wt.to_str().unwrap()],
+    );
+    assert!(wt.exists());
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("gw"));
+    cmd.current_dir(&wt)
+        .args(["rm", ".", "--yes"])
+        .assert()
+        .success();
+
+    assert!(!wt.exists());
+
+    let list = git_stdout(&repo, &["worktree", "list"]);
+    assert!(!list.contains(wt.to_string_lossy().as_ref()));
+}
+
+#[test]
+fn remove_dirty_worktree_fails_without_force_in_nontty() {
+    let td = TempDir::new().unwrap();
+    let repo = td.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+
+    run_git(&repo, &["init"]);
+    run_git(&repo, &["config", "user.email", "gw@example.com"]);
+    run_git(&repo, &["config", "user.name", "gw"]);
+
+    std::fs::write(repo.join("README.md"), "hi\n").unwrap();
+    run_git(&repo, &["add", "."]);
+    run_git(&repo, &["commit", "-m", "init"]);
+
+    let wt = td.path().join("wt");
+    run_git(
+        &repo,
+        &["worktree", "add", "-b", "feat", wt.to_str().unwrap()],
+    );
+    std::fs::write(wt.join("README.md"), "changed\n").unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("gw"));
+    cmd.current_dir(&repo)
+        .args(["rm", wt.to_str().unwrap(), "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("contains modified or untracked files"));
+
+    assert!(wt.exists());
+}

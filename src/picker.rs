@@ -6,10 +6,10 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use std::collections::HashMap;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -25,6 +25,7 @@ struct KnownRepo {
     hash: String,
     name: String,
     anchor: PathBuf,
+    git_common_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +39,7 @@ enum Mode {
     Normal,
     Filter,
     ConfirmDelete,
+    Help,
 }
 
 struct AppState {
@@ -158,6 +160,7 @@ fn list_known_repos(cfg_root: &Path) -> anyhow::Result<Vec<KnownRepo>> {
             hash,
             name: cfg.repo_name,
             anchor: PathBuf::from(cfg.anchor_path),
+            git_common_dir: PathBuf::from(cfg.git_common_dir),
         });
     }
 
@@ -174,7 +177,8 @@ fn picker_loop<W: Write>(
     let mut state = AppState {
         screen: Screen::Repo,
         mode: Mode::Normal,
-        status: "j/k move, gg/G top/bottom, / filter, enter select, q quit".to_string(),
+        status: "j/k move, gg/G top/bottom, / filter, enter select, n new, ? help, q quit"
+            .to_string(),
         pending_delete: None,
         repo_filter: String::new(),
         repo_selected: 0,
@@ -320,12 +324,40 @@ fn picker_loop<W: Write>(
             let footer =
                 Paragraph::new(state.status.clone()).block(Block::default().borders(Borders::ALL));
             f.render_widget(footer, chunks[2]);
+
+            if state.mode == Mode::Help {
+                let help = help_text(state.screen);
+                let area = centered_rect(86, 86, size);
+                f.render_widget(Clear, area);
+                f.render_widget(
+                    Paragraph::new(help)
+                        .block(Block::default().borders(Borders::ALL).title("Help"))
+                        .wrap(Wrap { trim: false }),
+                    area,
+                );
+            }
         })?;
 
         if event::poll(Duration::from_millis(50))?
             && let Event::Key(key) = event::read()?
         {
             if key.kind != KeyEventKind::Press {
+                continue;
+            }
+
+            if state.mode == Mode::Help {
+                match key.code {
+                    KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') => {
+                        state.mode = Mode::Normal;
+                        state.status = match state.screen {
+                            Screen::Repo => "j/k move, gg/G top/bottom, / filter, enter select, n new, ? help, q quit"
+                                .to_string(),
+                            Screen::Worktree => "j/k move, / filter, enter select, n new, ctrl+d delete, esc back, ? help, q quit"
+                                .to_string(),
+                        };
+                    }
+                    _ => {}
+                }
                 continue;
             }
 
@@ -466,10 +498,66 @@ fn handle_repo_key<W: Write>(
 ) -> anyhow::Result<Option<Option<PickerSelection>>> {
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => return Ok(Some(None)),
+        KeyCode::Char('?') => {
+            state.mode = Mode::Help;
+            state.status = "press ?/esc/q to close help".to_string();
+        }
         KeyCode::Char('/') => {
             state.mode = Mode::Filter;
             state.repo_filter.clear();
             state.status = "filter: type, enter to apply".to_string();
+        }
+        KeyCode::Char('n') => {
+            let repo = vis_repos
+                .get(state.repo_selected)
+                .context("no repo selected")?;
+
+            let anchor = match load_worktrees(cfg_root, repo) {
+                Ok((_, anchor)) => anchor,
+                Err(e) => {
+                    state.status = format!("failed to load worktrees: {e:#}");
+                    return Ok(None);
+                }
+            };
+
+            suspend_tui(terminal);
+            let res: anyhow::Result<Option<PathBuf>> = (|| {
+                use dialoguer::{Input, theme::ColorfulTheme};
+
+                let theme = ColorfulTheme::default();
+                let spec: String = Input::with_theme(&theme)
+                    .with_prompt("Branch name or GitHub PR URL")
+                    .interact_text()?;
+                let spec = spec.trim().to_string();
+                if spec.is_empty() {
+                    return Ok(None);
+                }
+
+                let wt_path = crate::create_worktree_from_spec(
+                    &anchor,
+                    cfg_root,
+                    &spec,
+                    None,
+                    None,
+                    None,
+                    false,
+                    true,
+                )?;
+                Ok(Some(wt_path))
+            })();
+
+            resume_tui(terminal)?;
+
+            match res? {
+                Some(wt_path) => {
+                    persist_repo_anchor(cfg_root, &repo.hash, &wt_path);
+                    return Ok(Some(Some(PickerSelection {
+                        repo_anchor: anchor,
+                        worktree_path: wt_path,
+                    })));
+                }
+                None => state.status = "new cancelled".to_string(),
+            }
         }
         KeyCode::Char('j') => {
             state.repo_selected = (state.repo_selected + 1).min(vis_repos.len().saturating_sub(1));
@@ -497,21 +585,26 @@ fn handle_repo_key<W: Write>(
             let repo = vis_repos
                 .get(state.repo_selected)
                 .context("no repo selected")?;
-            state.active_repo = Some((*repo).clone());
             state.screen = Screen::Worktree;
             state.mode = Mode::Normal;
             state.wt_filter.clear();
             state.wt_selected = 0;
             state.hotkey_buf.clear();
             state.pending_g = false;
-            state.status = "j/k move, / filter, enter select, esc back".to_string();
-            state.wt_entries = load_worktrees(repo)?;
-
-            if let Ok(ctx) = RepoContext::detect_from_path(&repo.anchor)
-                && let Some(mut cfg) = load_repo_config(cfg_root, &ctx)
-            {
-                cfg.anchor_path = repo.anchor.to_string_lossy().to_string();
-                let _ = save_repo_config(cfg_root, &ctx, &cfg);
+            state.status =
+                "j/k move, / filter, enter select, n new, ctrl+d delete, esc back, ? help, q quit"
+                    .to_string();
+            match load_worktrees(cfg_root, repo) {
+                Ok((wts, anchor)) => {
+                    let mut r = (*repo).clone();
+                    r.anchor = anchor;
+                    state.active_repo = Some(r);
+                    state.wt_entries = wts;
+                }
+                Err(e) => {
+                    state.status = format!("failed to load worktrees: {e:#}");
+                    return Ok(None);
+                }
             }
 
             terminal.clear().ok();
@@ -562,10 +655,20 @@ fn handle_worktree_key<W: Write>(
                 };
 
                 // We already confirmed in the UI; force yes to avoid dialoguer prompts.
-                crate::remove_worktree(&repo.anchor, &target, true, false)?;
+                let _ = crate::remove_worktree(&repo.anchor, &target, true, false)?;
                 state.mode = Mode::Normal;
                 state.status = "worktree removed".to_string();
-                state.wt_entries = load_worktrees(&repo)?;
+                match load_worktrees(cfg_root, &repo) {
+                    Ok((wts, anchor)) => {
+                        state.active_repo = Some(KnownRepo { anchor, ..repo.clone() });
+                        state.wt_entries = wts;
+                    }
+                    Err(e) => {
+                        state.status = format!("failed to load worktrees: {e:#}");
+                        state.mode = Mode::Normal;
+                        return Ok(None);
+                    }
+                }
                 return Ok(None);
             }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
@@ -598,12 +701,17 @@ fn handle_worktree_key<W: Write>(
 
     match key.code {
         KeyCode::Char('q') => return Ok(Some(None)),
+        KeyCode::Char('?') => {
+            state.mode = Mode::Help;
+            state.status = "press ?/esc/q to close help".to_string();
+        }
         KeyCode::Esc => {
             state.screen = Screen::Repo;
             state.mode = Mode::Normal;
             state.hotkey_buf.clear();
             state.pending_g = false;
-            state.status = "j/k move, gg/G top/bottom, / filter, enter select, q quit".to_string();
+            state.status = "j/k move, gg/G top/bottom, / filter, enter select, n new, ? help, q quit"
+                .to_string();
         }
         KeyCode::Char('n') => {
             suspend_tui(terminal);
@@ -613,22 +721,23 @@ fn handle_worktree_key<W: Write>(
                 use dialoguer::{Input, theme::ColorfulTheme};
 
                 let theme = ColorfulTheme::default();
-                let branch: String = Input::with_theme(&theme)
-                    .with_prompt("New branch/worktree name")
+                let spec: String = Input::with_theme(&theme)
+                    .with_prompt("Branch name or GitHub PR URL")
                     .interact_text()?;
-                let branch = branch.trim().to_string();
-                if branch.is_empty() {
+                let spec = spec.trim().to_string();
+                if spec.is_empty() {
                     return Ok(None);
                 }
 
-                let wt_path = crate::create_worktree(
+                let wt_path = crate::create_worktree_from_spec(
                     &repo.anchor,
                     cfg_root,
-                    &branch,
+                    &spec,
                     None,
                     None,
                     None,
                     false,
+                    true,
                 )?;
                 Ok(Some(wt_path))
             })();
@@ -679,9 +788,11 @@ fn handle_worktree_key<W: Write>(
                 .get(state.wt_selected)
                 .context("no worktree selected")?;
             let e = state.wt_entries.get(i).context("no worktree selected")?;
+            let wt_path = PathBuf::from(&e.path);
+            persist_repo_anchor(cfg_root, &repo.hash, &wt_path);
             return Ok(Some(Some(PickerSelection {
                 repo_anchor: repo.anchor,
-                worktree_path: PathBuf::from(&e.path),
+                worktree_path: wt_path,
             })));
         }
         KeyCode::Char(c) => {
@@ -711,20 +822,56 @@ fn handle_worktree_key<W: Write>(
     Ok(None)
 }
 
-fn load_worktrees(repo: &KnownRepo) -> anyhow::Result<Vec<WorktreeEntry>> {
+fn load_worktrees(
+    cfg_root: &Path,
+    repo: &KnownRepo,
+) -> anyhow::Result<(Vec<WorktreeEntry>, PathBuf)> {
+    // First try the configured anchor (fast path).
+    if repo.anchor.exists() {
+        let out = std::process::Command::new("git")
+            .current_dir(&repo.anchor)
+            .args(["worktree", "list", "--porcelain"])
+            .output();
+
+        if let Ok(out) = out
+            && out.status.success()
+        {
+            let txt = String::from_utf8(out.stdout)?;
+            return Ok((parse_worktree_porcelain(&txt), repo.anchor.clone()));
+        }
+    }
+
+    // Fallback: list worktrees using the repo's common git dir. This works even if the
+    // stored anchor points at a deleted worktree.
     let out = std::process::Command::new("git")
-        .current_dir(&repo.anchor)
+        .arg("--git-dir")
+        .arg(&repo.git_common_dir)
         .args(["worktree", "list", "--porcelain"])
         .output()?;
     if !out.status.success() {
         anyhow::bail!(
-            "git worktree list failed for {}: {}",
-            repo.anchor.to_string_lossy(),
+            "git worktree list failed (git_common_dir={}): {}",
+            repo.git_common_dir.to_string_lossy(),
             String::from_utf8_lossy(&out.stderr)
         );
     }
+
     let txt = String::from_utf8(out.stdout)?;
-    Ok(parse_worktree_porcelain(&txt))
+    let entries = parse_worktree_porcelain(&txt);
+
+    // Repair the stored anchor to something valid so future opens work without fallback.
+    let anchor = if let Some(first) = entries.first() {
+        PathBuf::from(&first.path)
+    } else {
+        // Shouldn't happen, but avoid returning a bogus path.
+        repo.anchor.clone()
+    };
+
+    if let Some(first) = entries.first() {
+        persist_repo_anchor(cfg_root, &repo.hash, Path::new(&first.path));
+    }
+
+    Ok((entries, anchor))
 }
 
 fn clear_hotkey_buf(state: &mut AppState) {
@@ -734,6 +881,141 @@ fn clear_hotkey_buf(state: &mut AppState) {
 fn reset_chords(state: &mut AppState) {
     state.hotkey_buf.clear();
     state.pending_g = false;
+}
+
+fn persist_repo_anchor(cfg_root: &Path, repo_hash: &str, anchor: &Path) {
+    let cfg_path = cfg_root
+        .join("repos")
+        .join(repo_hash)
+        .join("config.toml");
+    if let Ok(s) = std::fs::read_to_string(&cfg_path)
+        && let Ok(mut cfg) = toml::from_str::<RepoConfig>(&s)
+    {
+        cfg.anchor_path = anchor.to_string_lossy().to_string();
+        if let Ok(s2) = toml::to_string_pretty(&cfg) {
+            let _ = std::fs::write(cfg_path, s2);
+        }
+    }
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let w = r.width.saturating_mul(percent_x) / 100;
+    let h = r.height.saturating_mul(percent_y) / 100;
+    let x = r.x + (r.width.saturating_sub(w)) / 2;
+    let y = r.y + (r.height.saturating_sub(h)) / 2;
+    Rect { x, y, width: w, height: h }
+}
+
+fn help_text(screen: Screen) -> String {
+    let common = r#"New worktree input rules (single text field):
+- GitHub PR URL only (must be a URL): https://github.com/OWNER/REPO/pull/<N>
+- Otherwise, treat input as a branch name.
+- If branch exists locally: use it as-is (no fetch / no remote comparison).
+- If branch missing locally and exists on remote: fetch it, create a local tracking branch, then create the worktree.
+- If branch missing locally and not on remote: create a new branch, then create the worktree.
+- Remote selection: if exactly 1 remote, use it; otherwise you will be prompted to choose a remote.
+"#;
+
+    match screen {
+        Screen::Repo => format!(
+            r#"Repo Picker
+
+Keys:
+- j/k: move
+- gg/G: top/bottom
+- /: filter
+- enter: open repo's worktrees
+- n: create a new worktree for the highlighted repo (then select it)
+- ?: help
+- q/esc: quit
+
+{common}
+
+Tip: select a repo, then use enter to see its worktrees.
+"#
+        ),
+        Screen::Worktree => format!(
+            r#"Worktree Picker
+
+Keys:
+- j/k: move
+- gg/G: top/bottom
+- /: filter
+- enter: select highlighted worktree
+- n: create a new worktree for this repo (then select it)
+- ctrl+d: delete highlighted worktree (confirmation; branch preserved)
+- esc: back to repos
+- ?: help
+- q: quit
+
+{common}
+"#
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command as StdCommand;
+    use tempfile::TempDir;
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let status = StdCommand::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .status()
+            .expect("failed to run git");
+        assert!(status.success(), "git {:?} failed", args);
+    }
+
+    #[test]
+    fn load_worktrees_recovers_from_deleted_anchor_via_git_common_dir() {
+        let td = TempDir::new().unwrap();
+        let repo = td.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        run_git(&repo, &["init"]);
+        run_git(&repo, &["config", "user.email", "gw@example.com"]);
+        run_git(&repo, &["config", "user.name", "gw"]);
+        std::fs::write(repo.join("README.md"), "hi\n").unwrap();
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-m", "init"]);
+
+        let wt = td.path().join("wt");
+        run_git(
+            &repo,
+            &["worktree", "add", "-b", "feat", wt.to_str().unwrap()],
+        );
+
+        let cfg_root = td.path().join("cfg");
+        let ctx = crate::RepoContext::detect_from_path(&repo).unwrap();
+        let cfg = RepoConfig {
+            repo_name: ctx.repo_name.clone(),
+            git_common_dir: ctx.git_common_dir.to_string_lossy().to_string(),
+            anchor_path: td.path().join("does-not-exist").to_string_lossy().to_string(),
+            worktrees_dir: None,
+            hooks: Vec::new(),
+        };
+        crate::save_repo_config(&cfg_root, &ctx, &cfg).unwrap();
+
+        let repos = list_known_repos(&cfg_root).unwrap();
+        assert_eq!(repos.len(), 1);
+        let known = &repos[0];
+        assert!(!known.anchor.exists());
+
+        let (entries, anchor) = load_worktrees(&cfg_root, known).unwrap();
+        assert!(!entries.is_empty());
+        assert!(anchor.exists());
+
+        // Should have repaired anchor_path in config.
+        let repaired = crate::load_repo_config(&cfg_root, &ctx).unwrap();
+        assert_eq!(
+            repaired.anchor_path,
+            entries.first().unwrap().path,
+            "expected config anchor_path to be repaired to a valid worktree path"
+        );
+    }
 }
 
 fn push_hotkey(state: &mut AppState, c: char) {

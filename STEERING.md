@@ -12,7 +12,8 @@ This file captures durable steering from the human so it can be applied consiste
 
 ## Repo Conventions
 
-- TBD
+- Versioning: when pushing changes meant to be shared (release-worthy), bump the semver in `Cargo.toml` (patch by default unless behavior warrants minor/major), and align any tags/releases/Homebrew artifacts to the same version.
+- `gw new` UX: avoid extra syntax. Treat input as either a branch name or (only) a GitHub PR URL. For remotes, do not special-case `origin`: if exactly one remote exists use it, otherwise prompt the user to choose.
 
 ## Don’t Do
 

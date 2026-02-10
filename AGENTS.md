@@ -31,6 +31,30 @@ This file tracks work performed by an automated coding agent in this repo, so hu
 Verification:
 - `cargo test`
 
+### `gw rm`: delete current worktree + dirty-worktree prompting
+
+- Made `gw rm` accept a positional `PATH` (so `gw rm .` works from inside a worktree).
+- If `git worktree remove` fails because the worktree is dirty, `gw` prompts to retry with `--force`; if declined, it offers to `cd` into that worktree instead.
+- Updated the zsh shell integration so `gw rm ...` can output a path for the wrapper to `cd`.
+- Added regression tests in `tests/remove.rs`.
+
+Verification:
+- `cargo test`
+
+### `gw new`: branch/remote/PR URL resolver + TUI Help Center
+
+- Upgraded `gw new` to accept a single specifier: either a branch name or a GitHub PR URL (URLs only).
+- If the branch is missing locally but exists on the remote, `gw` fetches it and creates a local tracking branch before creating the worktree.
+- Remote selection rule: use the only remote if there is exactly one; otherwise prompt (no special-casing `origin`).
+- Extended the picker:
+  - `n` works on the repo screen (create/select a worktree for the highlighted repo).
+  - `?` opens an in-TUI Help Center describing the current screen and the new-worktree resolver rules.
+- Picker resilience: if the repo’s saved `anchor_path` points at a deleted worktree, the picker falls back to listing worktrees via `git_common_dir` and repairs the anchor automatically.
+- Added regression tests in `tests/new.rs`.
+
+Verification:
+- `cargo test`
+
 ### README: clarified positioning + install options
 
 - Added a cheeky opener framing 2026 as “multi-agent takeoff” and positioned `gw` as the tool for safely babysitting multiple agents via isolated worktrees.

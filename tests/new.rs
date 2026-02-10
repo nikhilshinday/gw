@@ -106,3 +106,105 @@ command = "echo hook > .gw_hook_ran"
     let wt = worktrees_dir.join("repo").join("feat2");
     assert!(wt.join(".gw_hook_ran").exists());
 }
+
+#[test]
+fn new_can_create_worktree_from_remote_branch_when_missing_locally() {
+    let td = TempDir::new().unwrap();
+    let remote = td.path().join("remote.git");
+    let repo = td.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+
+    // Remote.
+    run_git(td.path(), &["init", "--bare", remote.to_str().unwrap()]);
+
+    // Local.
+    run_git(&repo, &["init"]);
+    run_git(&repo, &["config", "user.email", "gw@example.com"]);
+    run_git(&repo, &["config", "user.name", "gw"]);
+    std::fs::write(repo.join("README.md"), "hi\n").unwrap();
+    run_git(&repo, &["add", "."]);
+    run_git(&repo, &["commit", "-m", "init"]);
+    run_git(
+        &repo,
+        &["remote", "add", "upstream", remote.to_str().unwrap()],
+    );
+
+    // Create a remote-only branch without creating it locally.
+    run_git(
+        &repo,
+        &["push", "upstream", "HEAD:refs/heads/feat-remote"],
+    );
+
+    let worktrees_dir = td.path().join("worktrees");
+    let cfg_dir = td.path().join("cfg");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("gw"));
+    cmd.current_dir(&repo)
+        .env("GW_CONFIG_DIR", &cfg_dir)
+        .args([
+            "new",
+            "feat-remote",
+            "--worktrees-dir",
+            worktrees_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let wt = worktrees_dir.join("repo").join("feat-remote");
+    assert!(wt.exists());
+
+    let branch = git_out(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    assert_eq!(branch.trim(), "feat-remote");
+
+    let upstream = git_out(&wt, &["rev-parse", "--abbrev-ref", "@{u}"]);
+    assert_eq!(upstream.trim(), "upstream/feat-remote");
+}
+
+#[test]
+fn new_accepts_github_pr_url() {
+    let td = TempDir::new().unwrap();
+    let remote = td.path().join("remote.git");
+    let repo = td.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+
+    // Remote.
+    run_git(td.path(), &["init", "--bare", remote.to_str().unwrap()]);
+
+    // Local.
+    run_git(&repo, &["init"]);
+    run_git(&repo, &["config", "user.email", "gw@example.com"]);
+    run_git(&repo, &["config", "user.name", "gw"]);
+    std::fs::write(repo.join("README.md"), "hi\n").unwrap();
+    run_git(&repo, &["add", "."]);
+    run_git(&repo, &["commit", "-m", "init"]);
+    run_git(
+        &repo,
+        &["remote", "add", "upstream", remote.to_str().unwrap()],
+    );
+
+    // Simulate a PR ref existing on the remote.
+    run_git(&repo, &["push", "upstream", "HEAD:refs/pull/7/head"]);
+
+    let worktrees_dir = td.path().join("worktrees");
+    let cfg_dir = td.path().join("cfg");
+
+    let pr_url = "https://github.com/example/repo/pull/7";
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("gw"));
+    cmd.current_dir(&repo)
+        .env("GW_CONFIG_DIR", &cfg_dir)
+        .args([
+            "new",
+            pr_url,
+            "--worktrees-dir",
+            worktrees_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let wt = worktrees_dir.join("repo").join("pr").join("7");
+    assert!(wt.exists());
+
+    let branch = git_out(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    assert_eq!(branch.trim(), "pr/7");
+}

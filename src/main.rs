@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 mod picker;
@@ -23,8 +24,11 @@ enum Command {
     List,
     /// Create a new branch + worktree
     New {
-        /// Branch name to create (or check out if it already exists)
-        branch: String,
+        /// Branch name or GitHub PR URL
+        ///
+        /// If this is a GitHub PR URL, `gw` will fetch the PR head ref and create a worktree.
+        /// Otherwise it is treated as a branch name.
+        spec: Option<String>,
         /// Override the repo worktrees directory and persist it to config
         #[arg(long)]
         worktrees_dir: Option<PathBuf>,
@@ -46,8 +50,13 @@ enum Command {
     Ls,
     /// Interactive worktree removal: pick repo -> worktree, then remove it (no branch deletion)
     Rm {
+        /// Worktree path to remove
+        ///
+        /// Example: `gw rm .` (remove current worktree), or `gw rm /path/to/wt`.
+        #[arg(value_name = "PATH", conflicts_with = "path")]
+        target: Option<PathBuf>,
         /// Worktree path to remove (skips interactive picker)
-        #[arg(long)]
+        #[arg(long, value_name = "PATH", conflicts_with = "target")]
         path: Option<PathBuf>,
         /// Skip confirmation prompt
         #[arg(long)]
@@ -88,7 +97,8 @@ gw() {{
     dest="$(command gw ls "${{@:2}}")" || return $?
     if [[ -n "$dest" ]]; then cd "$dest" || return $?; fi
   elif [[ "$1" == "rm" ]]; then
-    command gw rm "${{@:2}}"
+    dest="$(command gw rm "${{@:2}}")" || return $?
+    if [[ -n "$dest" ]]; then cd "$dest" || return $?; fi
   else
     command gw "$@"
   fi
@@ -112,7 +122,7 @@ gw() {{
             }
         }
         Some(Command::New {
-            branch,
+            spec,
             worktrees_dir,
             path,
             base,
@@ -120,14 +130,29 @@ gw() {{
         }) => {
             let cfg_root = config_root()?;
             let repo = RepoContext::detect_from_cwd()?;
-            let _ = create_worktree(
+            let spec = match spec {
+                Some(s) => s,
+                None => {
+                    if !std::io::stdin().is_terminal() {
+                        anyhow::bail!("no SPEC provided and no TTY available to prompt");
+                    }
+                    use dialoguer::{Input, theme::ColorfulTheme};
+                    let theme = ColorfulTheme::default();
+                    Input::with_theme(&theme)
+                        .with_prompt("Branch name or GitHub PR URL")
+                        .interact_text()?
+                }
+            };
+
+            let _ = create_worktree_from_spec(
                 &repo.toplevel,
                 &cfg_root,
-                &branch,
+                &spec,
                 worktrees_dir,
                 path,
                 base,
                 no_hooks,
+                true,
             )?;
         }
         None | Some(Command::Go) | Some(Command::Ls) => {
@@ -140,17 +165,27 @@ gw() {{
                 std::process::exit(1);
             }
         }
-        Some(Command::Rm { path, yes, force }) => {
-            if let Some(path) = path {
+        Some(Command::Rm {
+            target,
+            path,
+            yes,
+            force,
+        }) => {
+            let effective = target.or(path);
+            if let Some(path) = effective {
                 let repo = RepoContext::detect_from_cwd()?;
-                remove_worktree(&repo.toplevel, &path, yes, force)?;
+                if let Some(cd_to) = remove_worktree(&repo.toplevel, &path, yes, force)? {
+                    println!("{}", cd_to.to_string_lossy());
+                }
             } else {
                 let repo = RepoContext::detect_from_cwd().ok();
                 let cfg_root = config_root()?;
                 let Some(sel) = picker::pick_worktree(&cfg_root, repo)? else {
                     std::process::exit(1);
                 };
-                remove_worktree(&sel.repo_anchor, &sel.worktree_path, yes, force)?;
+                if let Some(cd_to) = remove_worktree(&sel.repo_anchor, &sel.worktree_path, yes, force)? {
+                    println!("{}", cd_to.to_string_lossy());
+                }
             }
         }
         Some(Command::Config) => {
@@ -271,7 +306,263 @@ pub(crate) fn create_worktree(
     Ok(wt_path)
 }
 
-fn remove_worktree(repo_cwd: &Path, path: &Path, yes: bool, force: bool) -> anyhow::Result<()> {
+#[derive(Debug, Clone)]
+struct GithubPr {
+    owner: String,
+    repo: String,
+    number: u64,
+}
+
+fn parse_github_pr_url(s: &str) -> Option<GithubPr> {
+    let s = s.trim();
+    let s = s.strip_prefix("https://").or_else(|| s.strip_prefix("http://"))?;
+    let (host, path) = s.split_once('/')?;
+    if host != "github.com" {
+        return None;
+    }
+    let mut segs = path.split('/');
+    let owner = segs.next()?.to_string();
+    let repo = segs.next()?.to_string();
+    if segs.next()? != "pull" {
+        return None;
+    }
+    let nseg = segs.next()?;
+    let digits: String = nseg.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    let number = digits.parse().ok()?;
+    Some(GithubPr { owner, repo, number })
+}
+
+fn parse_github_remote_url(url: &str) -> Option<(String, String, String)> {
+    let url = url.trim();
+
+    // https://github.com/OWNER/REPO(.git)
+    if let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .or_else(|| url.strip_prefix("ssh://"))
+    {
+        let (host, path) = rest.split_once('/')?;
+        let mut segs = path.split('/');
+        let owner = segs.next()?.to_string();
+        let mut repo = segs.next()?.to_string();
+        if let Some(r) = repo.strip_suffix(".git") {
+            repo = r.to_string();
+        }
+        return Some((host.to_string(), owner, repo));
+    }
+
+    // git@github.com:OWNER/REPO(.git)
+    if let Some((left, path)) = url.split_once(':')
+        && let Some((_, host)) = left.split_once('@')
+    {
+        let mut segs = path.split('/');
+        let owner = segs.next()?.to_string();
+        let mut repo = segs.next()?.to_string();
+        if let Some(r) = repo.strip_suffix(".git") {
+            repo = r.to_string();
+        }
+        return Some((host.to_string(), owner, repo));
+    }
+
+    None
+}
+
+fn list_remotes(repo: &RepoContext) -> anyhow::Result<Vec<String>> {
+    let out = git_stdout(&repo.toplevel, &["remote"])?;
+    Ok(out
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
+}
+
+fn choose_remote(repo: &RepoContext, interactive: bool) -> anyhow::Result<Option<String>> {
+    let remotes = list_remotes(repo)?;
+    if remotes.is_empty() {
+        return Ok(None);
+    }
+    if remotes.len() == 1 {
+        return Ok(Some(remotes[0].clone()));
+    }
+    if !interactive {
+        anyhow::bail!(
+            "multiple remotes configured ({}); re-run in a TTY to choose one",
+            remotes.join(", ")
+        );
+    }
+    use dialoguer::{Select, theme::ColorfulTheme};
+    let theme = ColorfulTheme::default();
+    let idx = Select::with_theme(&theme)
+        .with_prompt("Select remote")
+        .items(&remotes)
+        .default(0)
+        .interact()?;
+    Ok(remotes.get(idx).cloned())
+}
+
+fn remote_has_branch(repo: &RepoContext, remote: &str, branch: &str) -> anyhow::Result<bool> {
+    let status = std::process::Command::new("git")
+        .current_dir(&repo.toplevel)
+        .args([
+            "ls-remote",
+            "--exit-code",
+            "--heads",
+            remote,
+            &format!("refs/heads/{branch}"),
+        ])
+        .status()?;
+    Ok(status.success())
+}
+
+fn git_fetch_branch(repo: &RepoContext, remote: &str, branch: &str) -> anyhow::Result<()> {
+    let status = std::process::Command::new("git")
+        .current_dir(&repo.toplevel)
+        .args(["fetch", remote, branch])
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("git fetch {remote} {branch} failed");
+    }
+    Ok(())
+}
+
+fn git_create_tracking_branch(repo: &RepoContext, branch: &str, remote: &str) -> anyhow::Result<()> {
+    let status = std::process::Command::new("git")
+        .current_dir(&repo.toplevel)
+        .args(["branch", "--track", branch, &format!("{remote}/{branch}")])
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("git branch --track {branch} {remote}/{branch} failed");
+    }
+    Ok(())
+}
+
+fn git_fetch_pr(repo: &RepoContext, remote: &str, pr_number: u64, local_branch: &str) -> anyhow::Result<()> {
+    let status = std::process::Command::new("git")
+        .current_dir(&repo.toplevel)
+        .args([
+            "fetch",
+            remote,
+            &format!("refs/pull/{pr_number}/head:refs/heads/{local_branch}"),
+        ])
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("git fetch {remote} PR #{pr_number} failed");
+    }
+    Ok(())
+}
+
+pub(crate) fn create_worktree_from_spec(
+    repo_cwd: &Path,
+    cfg_root: &Path,
+    spec: &str,
+    worktrees_dir: Option<PathBuf>,
+    path: Option<PathBuf>,
+    base: Option<String>,
+    no_hooks: bool,
+    interactive: bool,
+) -> anyhow::Result<PathBuf> {
+    let repo = RepoContext::detect_from_path(repo_cwd)?;
+    let spec = spec.trim();
+    if spec.is_empty() {
+        anyhow::bail!("empty spec");
+    }
+
+    if let Some(pr) = parse_github_pr_url(spec) {
+        let remote = choose_remote(&repo, interactive)?
+            .ok_or_else(|| anyhow::anyhow!("no git remotes configured; cannot fetch PR"))?;
+
+        // Best-effort: if the remote URL looks like a GitHub URL, require it to match the PR URL.
+        if let Ok(remote_url) = git_stdout(&repo.toplevel, &["remote", "get-url", &remote]) {
+            if let Some((host, owner, rrepo)) = parse_github_remote_url(remote_url.trim()) {
+                if host == "github.com" && (owner != pr.owner || rrepo != pr.repo) {
+                    anyhow::bail!(
+                        "PR URL is for {}/{} but remote {} points to {}/{}",
+                        pr.owner,
+                        pr.repo,
+                        remote,
+                        owner,
+                        rrepo
+                    );
+                }
+            }
+        }
+
+        let branch = format!("pr/{}", pr.number);
+        eprintln!("gw: creating worktree from PR URL {}", spec);
+        eprintln!("gw: selected remote {remote}");
+        eprintln!("gw: fetching PR #{} into branch {}", pr.number, branch);
+        git_fetch_pr(&repo, &remote, pr.number, &branch)?;
+        eprintln!("gw: creating worktree for {}", branch);
+        return create_worktree(
+            &repo.toplevel,
+            cfg_root,
+            &branch,
+            worktrees_dir,
+            path,
+            None,
+            no_hooks,
+        );
+    }
+
+    let branch = spec.to_string();
+    if repo.git_show_ref_head(&branch)? {
+        eprintln!("gw: using existing local branch {branch}");
+        return create_worktree(
+            &repo.toplevel,
+            cfg_root,
+            &branch,
+            worktrees_dir,
+            path,
+            None,
+            no_hooks,
+        );
+    }
+
+    // Branch doesn't exist locally: see if it exists on a remote. If no remote, treat as new.
+    if let Some(remote) = choose_remote(&repo, interactive)? {
+        eprintln!("gw: branch {branch} not found locally");
+        eprintln!("gw: selected remote {remote}");
+        if remote_has_branch(&repo, &remote, &branch)? {
+            eprintln!("gw: found {branch} on {remote}; fetching");
+            git_fetch_branch(&repo, &remote, &branch)?;
+            eprintln!("gw: creating local tracking branch {branch} -> {remote}/{branch}");
+            git_create_tracking_branch(&repo, &branch, &remote)?;
+            eprintln!("gw: creating worktree for {branch}");
+            return create_worktree(
+                &repo.toplevel,
+                cfg_root,
+                &branch,
+                worktrees_dir,
+                path,
+                None,
+                no_hooks,
+            );
+        }
+        eprintln!("gw: branch {branch} not found on {remote}; creating new branch");
+    } else {
+        eprintln!("gw: no remotes configured; creating new branch {branch}");
+    }
+
+    create_worktree(
+        &repo.toplevel,
+        cfg_root,
+        &branch,
+        worktrees_dir,
+        path,
+        base,
+        no_hooks,
+    )
+}
+
+fn remove_worktree(
+    repo_cwd: &Path,
+    path: &Path,
+    yes: bool,
+    force: bool,
+) -> anyhow::Result<Option<PathBuf>> {
     let repo = RepoContext::detect_from_path(repo_cwd)?;
 
     let out = std::process::Command::new("git")
@@ -301,7 +592,12 @@ fn remove_worktree(repo_cwd: &Path, path: &Path, yes: bool, force: bool) -> anyh
         );
     }
 
+    let can_prompt = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+
     if !yes {
+        if !can_prompt {
+            anyhow::bail!("refusing to prompt without a TTY; re-run with --yes");
+        }
         let prompt = format!("Remove worktree at {}?", target.to_string_lossy());
         let ok = dialoguer::Confirm::new()
             .with_prompt(prompt)
@@ -312,14 +608,66 @@ fn remove_worktree(repo_cwd: &Path, path: &Path, yes: bool, force: bool) -> anyh
         }
     }
 
-    let mut args: Vec<String> = vec!["worktree".into(), "remove".into()];
-    if force {
-        args.push("--force".into());
+    // If we're currently inside the target, move to the main worktree so the OS doesn't
+    // reject directory deletion as "busy", and so git has a stable CWD.
+    let orig_cwd = std::env::current_dir().ok().and_then(|p| std::fs::canonicalize(p).ok());
+    let orig_in_target = orig_cwd
+        .as_ref()
+        .is_some_and(|cwd| cwd == &target || cwd.starts_with(&target));
+    if orig_in_target {
+        let _ = std::env::set_current_dir(&main);
     }
-    args.push(target.to_string_lossy().to_string());
 
-    repo.run_git_strings(&args)?;
-    Ok(())
+    let run_remove = |use_force: bool| -> anyhow::Result<std::process::Output> {
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(&main).args(["worktree", "remove"]);
+        if use_force {
+            cmd.arg("--force");
+        }
+        Ok(cmd.arg(&target).output()?)
+    };
+
+    let mut output = run_remove(force)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let is_dirty = stderr.contains("contains modified or untracked files");
+
+        if is_dirty && !force {
+            if !can_prompt {
+                anyhow::bail!("{stderr}");
+            }
+
+            let ok = dialoguer::Confirm::new()
+                .with_prompt("Worktree has modified/untracked files. Force remove?")
+                .default(false)
+                .interact()?;
+            if ok {
+                output = run_remove(true)?;
+                if !output.status.success() {
+                    anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr));
+                }
+            } else {
+                let go = dialoguer::Confirm::new()
+                    .with_prompt("Go to the worktree directory instead?")
+                    .default(true)
+                    .interact()?;
+                if go {
+                    eprintln!("Worktree not removed.");
+                    return Ok(Some(target));
+                }
+                anyhow::bail!("worktree not removed");
+            }
+        } else {
+            anyhow::bail!("{stderr}");
+        }
+    }
+
+    // If the user ran `gw rm .` from inside the removed worktree, help the shell wrapper land
+    // somewhere valid (otherwise the shell stays in a deleted directory).
+    if orig_in_target {
+        return Ok(Some(main));
+    }
+    Ok(None)
 }
 
 #[derive(Debug, Clone)]
