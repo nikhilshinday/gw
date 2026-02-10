@@ -108,3 +108,7 @@ This document is the repo’s **normative specification** for user-facing behavi
 
 - [GW-HOOKS-001] `gw hooks` MUST print configured global hooks as `global: <command>`.
 - [GW-HOOKS-002] When run inside a git repo with repo hooks, `gw hooks` MUST print them as `repo: <command>`.
+
+## Command: `gw version`
+
+- [GW-VERSION-001] `gw version` MUST print the current package version to stdout.

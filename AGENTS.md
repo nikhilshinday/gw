@@ -72,6 +72,14 @@ Verification:
 Verification:
 - `cargo test`
 
+### `gw version`
+
+- Added `gw version` to print the current package version.
+- Added `GW-VERSION-001` to `docs/spec.md` and a regression test in `tests/version.rs`.
+
+Verification:
+- `cargo test`
+
 ### README: clarified positioning + install options
 
 - Added a cheeky opener framing 2026 as “multi-agent takeoff” and positioned `gw` as the tool for safely babysitting multiple agents via isolated worktrees.

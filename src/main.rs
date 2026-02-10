@@ -69,6 +69,8 @@ enum Command {
     Config,
     /// Show configured hooks (global + per-repo)
     Hooks,
+    /// Print the current gw version
+    Version,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy)]
@@ -220,6 +222,9 @@ gw() {{
                     println!("repo: {}", h.command);
                 }
             }
+        }
+        Some(Command::Version) => {
+            println!("{}", env!("CARGO_PKG_VERSION"));
         }
     }
 
