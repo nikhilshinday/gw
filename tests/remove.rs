@@ -25,6 +25,7 @@ fn git_stdout(cwd: &Path, args: &[&str]) -> String {
 
 #[test]
 fn remove_deletes_worktree_path() {
+    // spec: GW-RM-002
     let td = TempDir::new().unwrap();
     let repo = td.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
@@ -58,6 +59,7 @@ fn remove_deletes_worktree_path() {
 
 #[test]
 fn remove_refuses_to_delete_main_worktree() {
+    // spec: GW-RM-003
     let td = TempDir::new().unwrap();
     let repo = td.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
@@ -82,6 +84,7 @@ fn remove_refuses_to_delete_main_worktree() {
 
 #[test]
 fn remove_accepts_positional_path() {
+    // spec: GW-RM-001
     let td = TempDir::new().unwrap();
     let repo = td.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
@@ -112,6 +115,7 @@ fn remove_accepts_positional_path() {
 
 #[test]
 fn remove_dot_deletes_current_worktree() {
+    // spec: GW-RM-001, GW-RM-007
     let td = TempDir::new().unwrap();
     let repo = td.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
@@ -135,7 +139,8 @@ fn remove_dot_deletes_current_worktree() {
     cmd.current_dir(&wt)
         .args(["rm", ".", "--yes"])
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains(repo.to_string_lossy().as_ref()));
 
     assert!(!wt.exists());
 
@@ -145,6 +150,7 @@ fn remove_dot_deletes_current_worktree() {
 
 #[test]
 fn remove_dirty_worktree_fails_without_force_in_nontty() {
+    // spec: GW-RM-008
     let td = TempDir::new().unwrap();
     let repo = td.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
@@ -172,4 +178,33 @@ fn remove_dirty_worktree_fails_without_force_in_nontty() {
         .stderr(predicate::str::contains("contains modified or untracked files"));
 
     assert!(wt.exists());
+}
+
+#[test]
+fn remove_requires_yes_without_tty() {
+    // spec: GW-RM-004
+    let td = TempDir::new().unwrap();
+    let repo = td.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+
+    run_git(&repo, &["init"]);
+    run_git(&repo, &["config", "user.email", "gw@example.com"]);
+    run_git(&repo, &["config", "user.name", "gw"]);
+
+    std::fs::write(repo.join("README.md"), "hi\n").unwrap();
+    run_git(&repo, &["add", "."]);
+    run_git(&repo, &["commit", "-m", "init"]);
+
+    let wt = td.path().join("wt");
+    run_git(
+        &repo,
+        &["worktree", "add", "-b", "feat", wt.to_str().unwrap()],
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("gw"));
+    cmd.current_dir(&repo)
+        .args(["rm", wt.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("TTY").or(predicate::str::contains("--yes")));
 }

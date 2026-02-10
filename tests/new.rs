@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use predicates::prelude::*;
 use std::path::Path;
 use std::process::Command as StdCommand;
 use tempfile::TempDir;
@@ -24,6 +25,7 @@ fn git_out(cwd: &Path, args: &[&str]) -> String {
 
 #[test]
 fn new_creates_worktree_and_branch() {
+    // spec: GW-NEW-001, GW-NEW-004, GW-NEW-022, GW-NEW-040, GW-NEW-042, GW-CFG-003, GW-NEW-060
     let td = TempDir::new().unwrap();
     let repo = td.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
@@ -49,7 +51,8 @@ fn new_creates_worktree_and_branch() {
             worktrees_dir.to_str().unwrap(),
         ])
         .assert()
-        .success();
+        .success()
+        .stderr(predicates::str::contains("gw:"));
 
     let wt = worktrees_dir.join("repo").join("feat1");
     assert!(wt.exists(), "expected worktree dir to exist: {wt:?}");
@@ -61,10 +64,16 @@ fn new_creates_worktree_and_branch() {
     // Repo config should be written.
     let repos_dir = cfg_dir.join("repos");
     assert!(repos_dir.exists());
+    let has_any_repo_cfg = std::fs::read_dir(&repos_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| e.path().join("config.toml").exists());
+    assert!(has_any_repo_cfg, "expected a repo config.toml to be written under repos/");
 }
 
 #[test]
 fn new_runs_hooks_when_configured() {
+    // spec: GW-NEW-050
     let td = TempDir::new().unwrap();
     let repo = td.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
@@ -108,7 +117,80 @@ command = "echo hook > .gw_hook_ran"
 }
 
 #[test]
+fn new_path_overrides_default_worktree_location() {
+    // spec: GW-NEW-043
+    let td = TempDir::new().unwrap();
+    let repo = td.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+
+    run_git(&repo, &["init"]);
+    run_git(&repo, &["config", "user.email", "gw@example.com"]);
+    run_git(&repo, &["config", "user.name", "gw"]);
+
+    std::fs::write(repo.join("README.md"), "hi\n").unwrap();
+    run_git(&repo, &["add", "."]);
+    run_git(&repo, &["commit", "-m", "init"]);
+
+    let cfg_dir = td.path().join("cfg");
+    let worktrees_dir = td.path().join("worktrees");
+    let explicit = td.path().join("explicit-wt");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("gw"));
+    cmd.current_dir(&repo)
+        .env("GW_CONFIG_DIR", &cfg_dir)
+        .args([
+            "new",
+            "feat-explicit",
+            "--worktrees-dir",
+            worktrees_dir.to_str().unwrap(),
+            "--path",
+            explicit.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert!(explicit.exists());
+    assert!(!worktrees_dir.join("repo").join("feat-explicit").exists());
+}
+
+#[test]
+fn new_uses_existing_local_branch_without_remote_actions() {
+    // spec: GW-NEW-020
+    let td = TempDir::new().unwrap();
+    let repo = td.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+
+    run_git(&repo, &["init"]);
+    run_git(&repo, &["config", "user.email", "gw@example.com"]);
+    run_git(&repo, &["config", "user.name", "gw"]);
+    std::fs::write(repo.join("README.md"), "hi\n").unwrap();
+    run_git(&repo, &["add", "."]);
+    run_git(&repo, &["commit", "-m", "init"]);
+    run_git(&repo, &["branch", "feat-local"]);
+
+    let worktrees_dir = td.path().join("worktrees");
+    let cfg_dir = td.path().join("cfg");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("gw"));
+    cmd.current_dir(&repo)
+        .env("GW_CONFIG_DIR", &cfg_dir)
+        .args([
+            "new",
+            "feat-local",
+            "--worktrees-dir",
+            worktrees_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("using existing local branch feat-local"));
+
+    let wt = worktrees_dir.join("repo").join("feat-local");
+    assert!(wt.exists());
+}
+
+#[test]
 fn new_can_create_worktree_from_remote_branch_when_missing_locally() {
+    // spec: GW-NEW-010, GW-NEW-021, GW-NEW-060
     let td = TempDir::new().unwrap();
     let remote = td.path().join("remote.git");
     let repo = td.path().join("repo");
@@ -148,7 +230,8 @@ fn new_can_create_worktree_from_remote_branch_when_missing_locally() {
             worktrees_dir.to_str().unwrap(),
         ])
         .assert()
-        .success();
+        .success()
+        .stderr(predicates::str::contains("gw:"));
 
     let wt = worktrees_dir.join("repo").join("feat-remote");
     assert!(wt.exists());
@@ -162,6 +245,7 @@ fn new_can_create_worktree_from_remote_branch_when_missing_locally() {
 
 #[test]
 fn new_accepts_github_pr_url() {
+    // spec: GW-NEW-003, GW-NEW-030, GW-NEW-060
     let td = TempDir::new().unwrap();
     let remote = td.path().join("remote.git");
     let repo = td.path().join("repo");
@@ -200,11 +284,112 @@ fn new_accepts_github_pr_url() {
             worktrees_dir.to_str().unwrap(),
         ])
         .assert()
-        .success();
+        .success()
+        .stderr(predicates::str::contains("gw:"));
 
     let wt = worktrees_dir.join("repo").join("pr").join("7");
     assert!(wt.exists());
 
     let branch = git_out(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]);
     assert_eq!(branch.trim(), "pr/7");
+}
+
+#[test]
+fn new_requires_spec_without_tty() {
+    // spec: GW-NEW-002
+    let td = TempDir::new().unwrap();
+    let repo = td.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+
+    run_git(&repo, &["init"]);
+    run_git(&repo, &["config", "user.email", "gw@example.com"]);
+    run_git(&repo, &["config", "user.name", "gw"]);
+    std::fs::write(repo.join("README.md"), "hi\n").unwrap();
+    run_git(&repo, &["add", "."]);
+    run_git(&repo, &["commit", "-m", "init"]);
+
+    let cfg_dir = td.path().join("cfg");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("gw"));
+    cmd.current_dir(&repo)
+        .env("GW_CONFIG_DIR", &cfg_dir)
+        .args(["new"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no SPEC").or(predicates::str::contains("TTY")));
+}
+
+#[test]
+fn new_fails_in_nontty_when_multiple_remotes_and_remote_needed() {
+    // spec: GW-NEW-012
+    let td = TempDir::new().unwrap();
+    let repo = td.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+
+    run_git(&repo, &["init"]);
+    run_git(&repo, &["config", "user.email", "gw@example.com"]);
+    run_git(&repo, &["config", "user.name", "gw"]);
+    std::fs::write(repo.join("README.md"), "hi\n").unwrap();
+    run_git(&repo, &["add", "."]);
+    run_git(&repo, &["commit", "-m", "init"]);
+
+    // Two remotes -> chooser would be required if remote is needed.
+    run_git(&repo, &["remote", "add", "a", "file:///tmp/a.git"]);
+    run_git(&repo, &["remote", "add", "b", "file:///tmp/b.git"]);
+
+    let worktrees_dir = td.path().join("worktrees");
+    let cfg_dir = td.path().join("cfg");
+
+    // Use a spec that forces "remote needed" path: PR URL.
+    let pr_url = "https://github.com/example/repo/pull/7";
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("gw"));
+    cmd.current_dir(&repo)
+        .env("GW_CONFIG_DIR", &cfg_dir)
+        .args([
+            "new",
+            pr_url,
+            "--worktrees-dir",
+            worktrees_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("multiple remotes"));
+}
+
+#[test]
+fn new_rejects_mismatched_pr_url_for_github_remote() {
+    // spec: GW-NEW-031
+    let td = TempDir::new().unwrap();
+    let repo = td.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+
+    run_git(&repo, &["init"]);
+    run_git(&repo, &["config", "user.email", "gw@example.com"]);
+    run_git(&repo, &["config", "user.name", "gw"]);
+    std::fs::write(repo.join("README.md"), "hi\n").unwrap();
+    run_git(&repo, &["add", "."]);
+    run_git(&repo, &["commit", "-m", "init"]);
+
+    // Remote is a GitHub URL for one repo, but PR URL is for a different repo.
+    run_git(
+        &repo,
+        &["remote", "add", "origin", "https://github.com/aaa/bbb.git"],
+    );
+
+    let worktrees_dir = td.path().join("worktrees");
+    let cfg_dir = td.path().join("cfg");
+
+    let pr_url = "https://github.com/other/thing/pull/7";
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("gw"));
+    cmd.current_dir(&repo)
+        .env("GW_CONFIG_DIR", &cfg_dir)
+        .args([
+            "new",
+            pr_url,
+            "--worktrees-dir",
+            worktrees_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("PR URL is for"));
 }

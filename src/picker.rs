@@ -971,6 +971,7 @@ mod tests {
 
     #[test]
     fn load_worktrees_recovers_from_deleted_anchor_via_git_common_dir() {
+        // spec: GW-PICK-005
         let td = TempDir::new().unwrap();
         let repo = td.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
@@ -1015,6 +1016,50 @@ mod tests {
             entries.first().unwrap().path,
             "expected config anchor_path to be repaired to a valid worktree path"
         );
+    }
+
+    #[test]
+    fn help_text_mentions_new_worktree_rules() {
+        // spec: GW-PICK-103
+        let repo_help = help_text(Screen::Repo);
+        assert!(repo_help.contains("New worktree input rules"));
+        assert!(repo_help.contains("Repo Picker"));
+
+        let wt_help = help_text(Screen::Worktree);
+        assert!(wt_help.contains("New worktree input rules"));
+        assert!(wt_help.contains("Worktree Picker"));
+    }
+
+    #[test]
+    fn persist_repo_anchor_updates_anchor_path() {
+        // spec: GW-PICK-006
+        let td = TempDir::new().unwrap();
+        let repo = td.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        run_git(&repo, &["init"]);
+        run_git(&repo, &["config", "user.email", "gw@example.com"]);
+        run_git(&repo, &["config", "user.name", "gw"]);
+        std::fs::write(repo.join("README.md"), "hi\n").unwrap();
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-m", "init"]);
+
+        let cfg_root = td.path().join("cfg");
+        let ctx = crate::RepoContext::detect_from_path(&repo).unwrap();
+        let cfg = RepoConfig {
+            repo_name: ctx.repo_name.clone(),
+            git_common_dir: ctx.git_common_dir.to_string_lossy().to_string(),
+            anchor_path: ctx.toplevel.to_string_lossy().to_string(),
+            worktrees_dir: None,
+            hooks: Vec::new(),
+        };
+        crate::save_repo_config(&cfg_root, &ctx, &cfg).unwrap();
+
+        let new_anchor = td.path().join("new-anchor");
+        persist_repo_anchor(&cfg_root, &ctx.repo_hash, &new_anchor);
+
+        let repaired = crate::load_repo_config(&cfg_root, &ctx).unwrap();
+        assert_eq!(repaired.anchor_path, new_anchor.to_string_lossy().as_ref());
     }
 }
 

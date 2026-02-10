@@ -55,6 +55,15 @@ Verification:
 Verification:
 - `cargo test`
 
+### Formal Spec + Coverage Gate
+
+- Added `docs/spec.md` with requirement IDs covering all user-facing commands and key behaviors.
+- Added `tests/spec_coverage.rs` to enforce that every non-manual requirement ID is referenced by at least one test (integration tests under `tests/` or unit tests in `src/` via `// spec: ...`).
+- Backfilled/expanded tests to reference spec IDs and cover config-root defaults, `gw new` behaviors, and `gw rm`/picker invariants.
+
+Verification:
+- `cargo test`
+
 ### README: clarified positioning + install options
 
 - Added a cheeky opener framing 2026 as “multi-agent takeoff” and positioned `gw` as the tool for safely babysitting multiple agents via isolated worktrees.

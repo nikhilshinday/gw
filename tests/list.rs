@@ -15,6 +15,7 @@ fn run_git(cwd: &Path, args: &[&str]) {
 
 #[test]
 fn list_shows_worktrees_in_repo() {
+    // spec: GW-LIST-001, GW-LIST-002
     let td = TempDir::new().unwrap();
     let repo = td.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();

@@ -152,7 +152,7 @@ gw() {{
                 path,
                 base,
                 no_hooks,
-                true,
+                std::io::stdin().is_terminal() && std::io::stderr().is_terminal(),
             )?;
         }
         None | Some(Command::Go) | Some(Command::Ls) => {
