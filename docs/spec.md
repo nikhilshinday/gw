@@ -41,6 +41,7 @@ This document is the repo’s **normative specification** for user-facing behavi
 - [GW-INIT-001] `gw init zsh` MUST print a zsh function wrapper named `gw()` that calls `command gw ...` to avoid recursion.
 - [GW-INIT-002] The wrapper MUST make `gw` (no args), `gw go`, and `gw ls` `cd` the current shell to the selected worktree.
 - [GW-INIT-003] The wrapper MUST allow `gw rm ...` to `cd` the current shell when `gw rm` prints a non-empty path.
+- [GW-INIT-004] The wrapper MUST allow `gw new ...` to `cd` the current shell when `gw new` prints a non-empty path.
 
 ## Command: `gw list`
 
@@ -87,6 +88,7 @@ This document is the repo’s **normative specification** for user-facing behavi
 ### User Feedback
 
 - [GW-NEW-060] `gw new` MUST print what it is doing (e.g. remote selection, fetch steps, branch/tracking actions) to stderr.
+- [GW-NEW-070] On success, `gw new` MUST print the created worktree path to stdout (for shell integration to `cd`).
 
 ## Command: `gw rm`
 

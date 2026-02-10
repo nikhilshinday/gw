@@ -101,6 +101,9 @@ gw() {{
   elif [[ "$1" == "rm" ]]; then
     dest="$(command gw rm "${{@:2}}")" || return $?
     if [[ -n "$dest" ]]; then cd "$dest" || return $?; fi
+  elif [[ "$1" == "new" ]]; then
+    dest="$(command gw new "${{@:2}}")" || return $?
+    if [[ -n "$dest" ]]; then cd "$dest" || return $?; fi
   else
     command gw "$@"
   fi
@@ -146,7 +149,8 @@ gw() {{
                 }
             };
 
-            let _ = create_worktree_from_spec(
+            // stdout is reserved for shell integration (`gw init zsh`) to `cd` into the created worktree.
+            let wt = create_worktree_from_spec(
                 &repo.toplevel,
                 &cfg_root,
                 &spec,
@@ -156,6 +160,7 @@ gw() {{
                 no_hooks,
                 std::io::stdin().is_terminal() && std::io::stderr().is_terminal(),
             )?;
+            println!("{}", wt.to_string_lossy());
         }
         None | Some(Command::Go) | Some(Command::Ls) => {
             let repo = RepoContext::detect_from_cwd().ok();

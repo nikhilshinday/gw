@@ -25,7 +25,7 @@ fn git_out(cwd: &Path, args: &[&str]) -> String {
 
 #[test]
 fn new_creates_worktree_and_branch() {
-    // spec: GW-NEW-001, GW-NEW-004, GW-NEW-022, GW-NEW-040, GW-NEW-042, GW-CFG-003, GW-NEW-060
+    // spec: GW-NEW-001, GW-NEW-004, GW-NEW-022, GW-NEW-040, GW-NEW-042, GW-CFG-003, GW-NEW-060, GW-NEW-070
     let td = TempDir::new().unwrap();
     let repo = td.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
@@ -52,6 +52,13 @@ fn new_creates_worktree_and_branch() {
         ])
         .assert()
         .success()
+        .stdout(predicate::str::contains(
+            worktrees_dir
+                .join("repo")
+                .join("feat1")
+                .to_string_lossy()
+                .to_string(),
+        ))
         .stderr(predicates::str::contains("gw:"));
 
     let wt = worktrees_dir.join("repo").join("feat1");
