@@ -18,4 +18,3 @@ fn config_root_defaults_to_home_dot_config_gw() {
             td.path().join(".config").join("gw").to_string_lossy()
         )));
 }
-

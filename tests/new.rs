@@ -75,7 +75,10 @@ fn new_creates_worktree_and_branch() {
         .unwrap()
         .filter_map(|e| e.ok())
         .any(|e| e.path().join("config.toml").exists());
-    assert!(has_any_repo_cfg, "expected a repo config.toml to be written under repos/");
+    assert!(
+        has_any_repo_cfg,
+        "expected a repo config.toml to be written under repos/"
+    );
 }
 
 #[test]
@@ -189,7 +192,9 @@ fn new_uses_existing_local_branch_without_remote_actions() {
         ])
         .assert()
         .success()
-        .stderr(predicates::str::contains("using existing local branch feat-local"));
+        .stderr(predicates::str::contains(
+            "using existing local branch feat-local",
+        ));
 
     let wt = worktrees_dir.join("repo").join("feat-local");
     assert!(wt.exists());
@@ -219,10 +224,7 @@ fn new_can_create_worktree_from_remote_branch_when_missing_locally() {
     );
 
     // Create a remote-only branch without creating it locally.
-    run_git(
-        &repo,
-        &["push", "upstream", "HEAD:refs/heads/feat-remote"],
-    );
+    run_git(&repo, &["push", "upstream", "HEAD:refs/heads/feat-remote"]);
 
     let worktrees_dir = td.path().join("worktrees");
     let cfg_dir = td.path().join("cfg");

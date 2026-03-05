@@ -31,6 +31,7 @@ This document is the repo’s **normative specification** for user-facing behavi
 - [GW-PICK-005] If the picker’s saved per-repo `anchor_path` points to a deleted worktree, the picker MUST still be able to show the repo’s worktree list (self-heal instead of failing).
 - [GW-PICK-006] Selecting a worktree MUST update/persist the repo’s `anchor_path` to the selected worktree path (to improve “next time” behavior).
 - [GW-PICK-104] The picker footer MUST always include a “commands” hint line describing the available keybindings for the current screen/mode.
+- [GW-PICK-105] While a picker-initiated worktree deletion is in progress, the footer MUST show a visible loading indicator and a delete-in-progress status message.
 
 - [GW-PICK-101][manual] Repo screen keybindings MUST include navigation (`j/k`, `gg/G`), filter (`/`), open repo (`enter`), new (`n`), help (`?`), quit (`q`/`esc`).
 - [GW-PICK-102][manual] Worktree screen keybindings MUST include navigation (`j/k`, `gg/G`), filter (`/`), select (`enter`), new (`n`), delete (`Ctrl+D`), help (`?`), back (`esc`), quit (`q`).

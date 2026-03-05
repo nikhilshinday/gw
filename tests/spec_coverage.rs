@@ -97,14 +97,20 @@ fn spec_requirement_ids_are_covered_by_tests() {
     // Ensure IDs are unique in the spec (easy to accidentally duplicate).
     let mut seen = BTreeSet::new();
     for id in manual.iter().chain(required.iter()) {
-        assert!(seen.insert(id.clone()), "duplicate requirement ID in spec: {id}");
+        assert!(
+            seen.insert(id.clone()),
+            "duplicate requirement ID in spec: {id}"
+        );
     }
 
     let tests_dir = repo_root().join("tests");
     let mut files = read_rs_files(&tests_dir);
     // Also allow unit tests co-located with code (e.g. src/picker.rs).
     files.extend(read_rs_files(&repo_root().join("src")));
-    assert!(!files.is_empty(), "no .rs files found to scan for spec coverage");
+    assert!(
+        !files.is_empty(),
+        "no .rs files found to scan for spec coverage"
+    );
 
     let mut covered_by: HashMap<String, Vec<PathBuf>> = HashMap::new();
     for (path, contents) in &files {

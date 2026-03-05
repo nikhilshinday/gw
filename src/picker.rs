@@ -13,6 +13,8 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use std::collections::HashMap;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::{
@@ -39,7 +41,14 @@ enum Mode {
     Normal,
     Filter,
     ConfirmDelete,
+    Deleting,
     Help,
+}
+
+struct DeleteInProgress {
+    target: PathBuf,
+    started_at: Instant,
+    receiver: Receiver<anyhow::Result<()>>,
 }
 
 struct AppState {
@@ -48,6 +57,7 @@ struct AppState {
 
     status: String,
     pending_delete: Option<PathBuf>,
+    delete_in_progress: Option<DeleteInProgress>,
 
     repo_filter: String,
     repo_selected: usize,
@@ -180,6 +190,7 @@ fn picker_loop<W: Write>(
         status: "j/k move, gg/G top/bottom, / filter, enter select, n new, ? help, q quit"
             .to_string(),
         pending_delete: None,
+        delete_in_progress: None,
         repo_filter: String::new(),
         repo_selected: 0,
         repo_list_state: ListState::default(),
@@ -209,6 +220,7 @@ fn picker_loop<W: Write>(
         if state.pending_g && state.last_g_at.elapsed() > Duration::from_millis(600) {
             state.pending_g = false;
         }
+        poll_delete_progress(cfg_root, &mut state);
 
         let (vis_repos, repo_codes, repo_code_map) = visible_repos(repos, &state.repo_filter);
         state.repo_selected = state.repo_selected.min(vis_repos.len().saturating_sub(1));
@@ -321,8 +333,17 @@ fn picker_loop<W: Write>(
                 }
             }
 
-            let footer = Paragraph::new(footer_text(&state.status, state.screen, state.mode))
-                .block(Block::default().borders(Borders::ALL));
+            let spinner = state
+                .delete_in_progress
+                .as_ref()
+                .map(|delete| delete_spinner(delete.started_at));
+            let footer = Paragraph::new(footer_text(
+                &state.status,
+                state.screen,
+                state.mode,
+                spinner,
+            ))
+            .block(Block::default().borders(Borders::ALL));
             f.render_widget(footer, chunks[2]);
 
             if state.mode == Mode::Help {
@@ -529,14 +550,7 @@ fn handle_repo_key<W: Write>(
                 }
 
                 let wt_path = crate::create_worktree_from_spec(
-                    &anchor,
-                    cfg_root,
-                    &spec,
-                    None,
-                    None,
-                    None,
-                    false,
-                    true,
+                    &anchor, cfg_root, &spec, None, None, None, false, true,
                 )?;
                 Ok(Some(wt_path))
             })();
@@ -639,6 +653,10 @@ fn handle_worktree_key<W: Write>(
         return Ok(None);
     };
 
+    if state.mode == Mode::Deleting {
+        return Ok(None);
+    }
+
     // Confirmation mode for delete.
     if state.mode == Mode::ConfirmDelete {
         match key.code {
@@ -649,21 +667,9 @@ fn handle_worktree_key<W: Write>(
                     return Ok(None);
                 };
 
-                // We already confirmed in the UI; force yes to avoid dialoguer prompts.
-                let _ = crate::remove_worktree(&repo.anchor, &target, true, false)?;
-                state.mode = Mode::Normal;
-                state.status = "worktree removed".to_string();
-                match load_worktrees(cfg_root, &repo) {
-                    Ok((wts, anchor)) => {
-                        state.active_repo = Some(KnownRepo { anchor, ..repo.clone() });
-                        state.wt_entries = wts;
-                    }
-                    Err(e) => {
-                        state.status = format!("failed to load worktrees: {e:#}");
-                        state.mode = Mode::Normal;
-                        return Ok(None);
-                    }
-                }
+                state.delete_in_progress = Some(spawn_delete_worktree(&repo.anchor, &target)?);
+                state.mode = Mode::Deleting;
+                state.status = format!("deleting {}", target.to_string_lossy());
                 return Ok(None);
             }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
@@ -686,10 +692,7 @@ fn handle_worktree_key<W: Write>(
             let target = PathBuf::from(&e.path);
             state.pending_delete = Some(target.clone());
             state.mode = Mode::ConfirmDelete;
-            state.status = format!(
-                "delete {} ? (y/n)",
-                target.to_string_lossy()
-            );
+            state.status = format!("delete {} ? (y/n)", target.to_string_lossy());
             return Ok(None);
         }
     }
@@ -705,8 +708,9 @@ fn handle_worktree_key<W: Write>(
             state.mode = Mode::Normal;
             state.hotkey_buf.clear();
             state.pending_g = false;
-            state.status = "j/k move, gg/G top/bottom, / filter, enter select, n new, ? help, q quit"
-                .to_string();
+            state.status =
+                "j/k move, gg/G top/bottom, / filter, enter select, n new, ? help, q quit"
+                    .to_string();
         }
         KeyCode::Char('n') => {
             suspend_tui(terminal);
@@ -873,26 +877,89 @@ fn clear_hotkey_buf(state: &mut AppState) {
     state.hotkey_buf.clear();
 }
 
+fn poll_delete_progress(cfg_root: &Path, state: &mut AppState) {
+    let Some(delete) = state.delete_in_progress.as_ref() else {
+        return;
+    };
+
+    match delete.receiver.try_recv() {
+        Ok(result) => {
+            let target = delete.target.clone();
+            state.delete_in_progress = None;
+            state.mode = Mode::Normal;
+
+            match result {
+                Ok(()) => {
+                    state.status = "worktree removed".to_string();
+                    if let Some(repo) = state.active_repo.clone() {
+                        match load_worktrees(cfg_root, &repo) {
+                            Ok((wts, anchor)) => {
+                                state.active_repo = Some(KnownRepo { anchor, ..repo });
+                                state.wt_entries = wts;
+                            }
+                            Err(e) => {
+                                state.status =
+                                    format!("worktree removed, but failed to reload: {e:#}");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    state.status = format!("failed to remove {}: {e:#}", target.to_string_lossy());
+                }
+            }
+        }
+        Err(TryRecvError::Empty) => {}
+        Err(TryRecvError::Disconnected) => {
+            state.delete_in_progress = None;
+            state.mode = Mode::Normal;
+            state.status = "delete failed: worker disconnected".to_string();
+        }
+    }
+}
+
 fn reset_chords(state: &mut AppState) {
     state.hotkey_buf.clear();
     state.pending_g = false;
+}
+
+fn delete_spinner(started_at: Instant) -> char {
+    const FRAMES: [char; 4] = ['|', '/', '-', '\\'];
+    let idx = (started_at.elapsed().as_millis() / 100) as usize % FRAMES.len();
+    FRAMES[idx]
 }
 
 fn command_hint(screen: Screen, mode: Mode) -> &'static str {
     match mode {
         Mode::Filter => "commands: type to filter, enter apply, esc cancel",
         Mode::ConfirmDelete => "commands: y confirm delete, n/esc cancel",
+        Mode::Deleting => "commands: wait for delete to finish",
         Mode::Help => "commands: ?/esc/q close help",
         Mode::Normal => match screen {
-            Screen::Repo => "commands: j/k move, gg/G top/bottom, / filter, enter open, n new, ? help, q/esc quit",
-            Screen::Worktree => "commands: j/k move, gg/G top/bottom, / filter, enter select, n new, ctrl+d delete, esc back, ? help, q quit",
+            Screen::Repo => {
+                "commands: j/k move, gg/G top/bottom, / filter, enter open, n new, ? help, q/esc quit"
+            }
+            Screen::Worktree => {
+                "commands: j/k move, gg/G top/bottom, / filter, enter select, n new, ctrl+d delete, esc back, ? help, q quit"
+            }
         },
     }
 }
 
-fn footer_text(status: &str, screen: Screen, mode: Mode) -> String {
+fn footer_text(status: &str, screen: Screen, mode: Mode, spinner: Option<char>) -> String {
     let hint = command_hint(screen, mode);
     let status = status.trim();
+    let status = if mode == Mode::Deleting {
+        let spinner = spinner.unwrap_or('|');
+        if status.is_empty() {
+            format!("[{spinner}] deleting")
+        } else {
+            format!("[{spinner}] {status}")
+        }
+    } else {
+        status.to_string()
+    };
+
     if status.is_empty() {
         hint.to_string()
     } else {
@@ -900,11 +967,86 @@ fn footer_text(status: &str, screen: Screen, mode: Mode) -> String {
     }
 }
 
+fn spawn_delete_worktree(repo_anchor: &Path, target: &Path) -> anyhow::Result<DeleteInProgress> {
+    let job = prepare_delete_worktree(repo_anchor, target)?;
+    let started_at = Instant::now();
+    let (tx, rx) = mpsc::channel();
+    let target = job.target.clone();
+    thread::spawn(move || {
+        let res = run_delete_worktree(job.main, job.target);
+        let _ = tx.send(res);
+    });
+
+    Ok(DeleteInProgress {
+        target,
+        started_at,
+        receiver: rx,
+    })
+}
+
+struct DeleteWorktreeJob {
+    main: PathBuf,
+    target: PathBuf,
+}
+
+fn prepare_delete_worktree(repo_anchor: &Path, target: &Path) -> anyhow::Result<DeleteWorktreeJob> {
+    let repo = crate::RepoContext::detect_from_path(repo_anchor)?;
+    let out = std::process::Command::new("git")
+        .current_dir(&repo.toplevel)
+        .args(["worktree", "list", "--porcelain"])
+        .output()?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "git worktree list failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+
+    let entries = crate::parse_worktree_porcelain(&String::from_utf8(out.stdout)?);
+    let main = entries
+        .first()
+        .map(|entry| PathBuf::from(&entry.path))
+        .unwrap_or(repo.toplevel);
+    let main = std::fs::canonicalize(&main).unwrap_or(main);
+    let target = std::fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
+
+    if target == main {
+        anyhow::bail!(
+            "refusing to remove main worktree: {}",
+            target.to_string_lossy()
+        );
+    }
+
+    let orig_cwd = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| std::fs::canonicalize(cwd).ok());
+    if orig_cwd
+        .as_ref()
+        .is_some_and(|cwd| cwd == &target || cwd.starts_with(&target))
+    {
+        let _ = std::env::set_current_dir(&main);
+    }
+
+    Ok(DeleteWorktreeJob { main, target })
+}
+
+fn run_delete_worktree(main: PathBuf, target: PathBuf) -> anyhow::Result<()> {
+    let out = std::process::Command::new("git")
+        .current_dir(&main)
+        .args(["worktree", "remove"])
+        .arg(&target)
+        .output()?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "{}",
+            String::from_utf8_lossy(&out.stderr).trim().to_string()
+        );
+    }
+    Ok(())
+}
+
 fn persist_repo_anchor(cfg_root: &Path, repo_hash: &str, anchor: &Path) {
-    let cfg_path = cfg_root
-        .join("repos")
-        .join(repo_hash)
-        .join("config.toml");
+    let cfg_path = cfg_root.join("repos").join(repo_hash).join("config.toml");
     if let Ok(s) = std::fs::read_to_string(&cfg_path)
         && let Ok(mut cfg) = toml::from_str::<RepoConfig>(&s)
     {
@@ -920,7 +1062,12 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let h = r.height.saturating_mul(percent_y) / 100;
     let x = r.x + (r.width.saturating_sub(w)) / 2;
     let y = r.y + (r.height.saturating_sub(h)) / 2;
-    Rect { x, y, width: w, height: h }
+    Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    }
 }
 
 fn help_text(screen: Screen) -> String {
@@ -1011,7 +1158,11 @@ mod tests {
         let cfg = RepoConfig {
             repo_name: ctx.repo_name.clone(),
             git_common_dir: ctx.git_common_dir.to_string_lossy().to_string(),
-            anchor_path: td.path().join("does-not-exist").to_string_lossy().to_string(),
+            anchor_path: td
+                .path()
+                .join("does-not-exist")
+                .to_string_lossy()
+                .to_string(),
             worktrees_dir: None,
             hooks: Vec::new(),
         };
@@ -1082,13 +1233,54 @@ mod tests {
     #[test]
     fn footer_text_always_includes_command_hint() {
         // spec: GW-PICK-104
-        let txt = footer_text("hello", Screen::Repo, Mode::Normal);
+        let txt = footer_text("hello", Screen::Repo, Mode::Normal, None);
         assert!(txt.contains("hello"));
         assert!(txt.contains("commands:"));
 
-        let txt = footer_text("", Screen::Worktree, Mode::Help);
+        let txt = footer_text("", Screen::Worktree, Mode::Help, None);
         assert!(txt.contains("commands:"));
         assert!(txt.contains("close help"));
+    }
+
+    #[test]
+    fn footer_text_shows_delete_spinner_while_removal_is_in_progress() {
+        // spec: GW-PICK-105
+        let txt = footer_text(
+            "deleting /tmp/wt",
+            Screen::Worktree,
+            Mode::Deleting,
+            Some('|'),
+        );
+        assert!(txt.contains("[|] deleting /tmp/wt"));
+        assert!(txt.contains("wait for delete to finish"));
+    }
+
+    #[test]
+    fn delete_worker_returns_git_error_for_dirty_worktree() {
+        let td = TempDir::new().unwrap();
+        let repo = td.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        run_git(&repo, &["init"]);
+        run_git(&repo, &["config", "user.email", "gw@example.com"]);
+        run_git(&repo, &["config", "user.name", "gw"]);
+        std::fs::write(repo.join("README.md"), "hi\n").unwrap();
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-m", "init"]);
+
+        let wt = td.path().join("wt");
+        run_git(
+            &repo,
+            &["worktree", "add", "-b", "feat", wt.to_str().unwrap()],
+        );
+        std::fs::write(wt.join("README.md"), "changed\n").unwrap();
+
+        let job = prepare_delete_worktree(&repo, &wt).unwrap();
+        let err = run_delete_worktree(job.main, job.target).unwrap_err();
+        assert!(
+            err.to_string().contains("contains modified or untracked files"),
+            "expected git dirty-worktree error, got: {err:#}"
+        );
     }
 }
 

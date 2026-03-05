@@ -175,7 +175,9 @@ fn remove_dirty_worktree_fails_without_force_in_nontty() {
         .args(["rm", wt.to_str().unwrap(), "--yes"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("contains modified or untracked files"));
+        .stderr(predicate::str::contains(
+            "contains modified or untracked files",
+        ));
 
     assert!(wt.exists());
 }

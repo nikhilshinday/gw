@@ -12,6 +12,17 @@ This file tracks work performed by an automated coding agent in this repo, so hu
 
 ## Work Summary (2026-02-09)
 
+### Picker delete: visible in-progress footer + non-blocking removal
+
+- Changed in-picker worktree deletion to run as a background git removal job after the `y` confirmation instead of calling the interactive `gw rm` prompt path from inside the TUI.
+- Added a dedicated deleting mode so the footer now shows a live ASCII spinner and explicit `deleting ...` status while removal is in progress.
+- During delete, the picker ignores extra keypresses and refreshes the worktree list when the job completes.
+- Dirty worktree failures now come back as an explicit footer error instead of trying to open a hidden prompt inside the alternate-screen UI.
+- Added `GW-PICK-105` to `docs/spec.md` and regression coverage in `src/picker.rs`.
+
+Verification:
+- `cargo test`
+
 ### Skills: captured durable steering workflow
 
 - Added `STEERING.md` to persist human steering/preferences for this repo.

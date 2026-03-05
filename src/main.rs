@@ -190,7 +190,9 @@ gw() {{
                 let Some(sel) = picker::pick_worktree(&cfg_root, repo)? else {
                     std::process::exit(1);
                 };
-                if let Some(cd_to) = remove_worktree(&sel.repo_anchor, &sel.worktree_path, yes, force)? {
+                if let Some(cd_to) =
+                    remove_worktree(&sel.repo_anchor, &sel.worktree_path, yes, force)?
+                {
                     println!("{}", cd_to.to_string_lossy());
                 }
             }
@@ -325,7 +327,9 @@ struct GithubPr {
 
 fn parse_github_pr_url(s: &str) -> Option<GithubPr> {
     let s = s.trim();
-    let s = s.strip_prefix("https://").or_else(|| s.strip_prefix("http://"))?;
+    let s = s
+        .strip_prefix("https://")
+        .or_else(|| s.strip_prefix("http://"))?;
     let (host, path) = s.split_once('/')?;
     if host != "github.com" {
         return None;
@@ -342,7 +346,11 @@ fn parse_github_pr_url(s: &str) -> Option<GithubPr> {
         return None;
     }
     let number = digits.parse().ok()?;
-    Some(GithubPr { owner, repo, number })
+    Some(GithubPr {
+        owner,
+        repo,
+        number,
+    })
 }
 
 fn parse_github_remote_url(url: &str) -> Option<(String, String, String)> {
@@ -438,7 +446,11 @@ fn git_fetch_branch(repo: &RepoContext, remote: &str, branch: &str) -> anyhow::R
     Ok(())
 }
 
-fn git_create_tracking_branch(repo: &RepoContext, branch: &str, remote: &str) -> anyhow::Result<()> {
+fn git_create_tracking_branch(
+    repo: &RepoContext,
+    branch: &str,
+    remote: &str,
+) -> anyhow::Result<()> {
     let status = std::process::Command::new("git")
         .current_dir(&repo.toplevel)
         .args(["branch", "--track", branch, &format!("{remote}/{branch}")])
@@ -449,7 +461,12 @@ fn git_create_tracking_branch(repo: &RepoContext, branch: &str, remote: &str) ->
     Ok(())
 }
 
-fn git_fetch_pr(repo: &RepoContext, remote: &str, pr_number: u64, local_branch: &str) -> anyhow::Result<()> {
+fn git_fetch_pr(
+    repo: &RepoContext,
+    remote: &str,
+    pr_number: u64,
+    local_branch: &str,
+) -> anyhow::Result<()> {
     let status = std::process::Command::new("git")
         .current_dir(&repo.toplevel)
         .args([
@@ -620,7 +637,9 @@ fn remove_worktree(
 
     // If we're currently inside the target, move to the main worktree so the OS doesn't
     // reject directory deletion as "busy", and so git has a stable CWD.
-    let orig_cwd = std::env::current_dir().ok().and_then(|p| std::fs::canonicalize(p).ok());
+    let orig_cwd = std::env::current_dir()
+        .ok()
+        .and_then(|p| std::fs::canonicalize(p).ok());
     let orig_in_target = orig_cwd
         .as_ref()
         .is_some_and(|cwd| cwd == &target || cwd.starts_with(&target));
