@@ -10,3 +10,13 @@ fn version_prints_package_version() {
         .success()
         .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
 }
+
+#[test]
+fn dash_dash_version_prints_package_version() {
+    // spec: GW-VERSION-002
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("gw"));
+    cmd.args(["--version"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
+}

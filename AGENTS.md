@@ -12,6 +12,15 @@ This file tracks work performed by an automated coding agent in this repo, so hu
 
 ## Work Summary (2026-02-09)
 
+### Picker delete chord: switch from `Ctrl+D` to `dd`; add `gw --version`
+
+- Replaced the worktree picker delete trigger with a `dd` chord because `Ctrl+D` was not being detected reliably in practice.
+- Reserved `d` on the worktree screen for deletion, updated footer/help text to advertise `dd`, and added regression coverage for the confirmation transition.
+- Enabled Clap's standard `--version` flag so `gw --version` prints the current package version in addition to `gw version`.
+
+Verification:
+- `cargo test`
+
 ### Picker delete: visible in-progress footer + non-blocking removal
 
 - Changed in-picker worktree deletion to run as a background git removal job after the `y` confirmation instead of calling the interactive `gw rm` prompt path from inside the TUI.

@@ -90,7 +90,7 @@ gw   # or: gw go
 - Quick select hotkeys: `a/s/d/f/...` (single-key then overflow into two-letter combinations)
 - In worktree list:
   - `n` create a new worktree (prompts for branch name, then selects it)
-  - `Ctrl+D` delete selected worktree (with confirmation; does not delete branch)
+  - `dd` delete selected worktree (with confirmation; does not delete branch)
 
 ### Hooks
 

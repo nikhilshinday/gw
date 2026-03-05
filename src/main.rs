@@ -8,6 +8,7 @@ mod picker;
 #[derive(Parser, Debug)]
 #[command(name = "gw")]
 #[command(about = "Git worktree helper", long_about = None)]
+#[command(version)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,

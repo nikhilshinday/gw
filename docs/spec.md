@@ -34,8 +34,9 @@ This document is the repo’s **normative specification** for user-facing behavi
 - [GW-PICK-105] While a picker-initiated worktree deletion is in progress, the footer MUST show a visible loading indicator and a delete-in-progress status message.
 
 - [GW-PICK-101][manual] Repo screen keybindings MUST include navigation (`j/k`, `gg/G`), filter (`/`), open repo (`enter`), new (`n`), help (`?`), quit (`q`/`esc`).
-- [GW-PICK-102][manual] Worktree screen keybindings MUST include navigation (`j/k`, `gg/G`), filter (`/`), select (`enter`), new (`n`), delete (`Ctrl+D`), help (`?`), back (`esc`), quit (`q`).
+- [GW-PICK-102][manual] Worktree screen keybindings MUST include navigation (`j/k`, `gg/G`), filter (`/`), select (`enter`), new (`n`), delete (`dd`), help (`?`), back (`esc`), quit (`q`).
 - [GW-PICK-103] Pressing `?` MUST display a help overlay describing the current screen and the “new worktree input rules”.
+- [GW-PICK-106] On the worktree screen, typing `dd` MUST enter delete confirmation for the highlighted worktree.
 
 ## Command: `gw init zsh`
 
@@ -115,3 +116,4 @@ This document is the repo’s **normative specification** for user-facing behavi
 ## Command: `gw version`
 
 - [GW-VERSION-001] `gw version` MUST print the current package version to stdout.
+- [GW-VERSION-002] `gw --version` MUST print the current package version to stdout.

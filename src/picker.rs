@@ -75,6 +75,8 @@ struct AppState {
 
     pending_g: bool,
     last_g_at: Instant,
+    pending_d: bool,
+    last_d_at: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -203,6 +205,8 @@ fn picker_loop<W: Write>(
         last_hotkey_at: Instant::now(),
         pending_g: false,
         last_g_at: Instant::now(),
+        pending_d: false,
+        last_d_at: Instant::now(),
     };
 
     if let Some(cur) = current_repo
@@ -219,6 +223,9 @@ fn picker_loop<W: Write>(
         }
         if state.pending_g && state.last_g_at.elapsed() > Duration::from_millis(600) {
             state.pending_g = false;
+        }
+        if state.pending_d && state.last_d_at.elapsed() > Duration::from_millis(600) {
+            state.pending_d = false;
         }
         poll_delete_progress(cfg_root, &mut state);
 
@@ -600,8 +607,9 @@ fn handle_repo_key<W: Write>(
             state.wt_selected = 0;
             state.hotkey_buf.clear();
             state.pending_g = false;
+            state.pending_d = false;
             state.status =
-                "j/k move, / filter, enter select, n new, ctrl+d delete, esc back, ? help, q quit"
+                "j/k move, / filter, enter select, n new, dd delete, esc back, ? help, q quit"
                     .to_string();
             match load_worktrees(cfg_root, repo) {
                 Ok((wts, anchor)) => {
@@ -682,19 +690,15 @@ fn handle_worktree_key<W: Write>(
         }
     }
 
-    // Ctrl+D: delete selected worktree (with confirmation).
     if key.modifiers.contains(KeyModifiers::CONTROL) {
-        if let KeyCode::Char('d') = key.code {
-            let i = *vis_wt_idx
-                .get(state.wt_selected)
-                .context("no worktree selected")?;
-            let e = state.wt_entries.get(i).context("no worktree selected")?;
-            let target = PathBuf::from(&e.path);
-            state.pending_delete = Some(target.clone());
-            state.mode = Mode::ConfirmDelete;
-            state.status = format!("delete {} ? (y/n)", target.to_string_lossy());
-            return Ok(None);
-        }
+        state.pending_d = false;
+    }
+
+    if let KeyCode::Char('d') = key.code
+        && !key.modifiers.contains(KeyModifiers::CONTROL)
+        && handle_worktree_delete_chord(state, 'd', vis_wt_idx)?
+    {
+        return Ok(None);
     }
 
     match key.code {
@@ -708,6 +712,7 @@ fn handle_worktree_key<W: Write>(
             state.mode = Mode::Normal;
             state.hotkey_buf.clear();
             state.pending_g = false;
+            state.pending_d = false;
             state.status =
                 "j/k move, gg/G top/bottom, / filter, enter select, n new, ? help, q quit"
                     .to_string();
@@ -921,6 +926,7 @@ fn poll_delete_progress(cfg_root: &Path, state: &mut AppState) {
 fn reset_chords(state: &mut AppState) {
     state.hotkey_buf.clear();
     state.pending_g = false;
+    state.pending_d = false;
 }
 
 fn delete_spinner(started_at: Instant) -> char {
@@ -940,7 +946,7 @@ fn command_hint(screen: Screen, mode: Mode) -> &'static str {
                 "commands: j/k move, gg/G top/bottom, / filter, enter open, n new, ? help, q/esc quit"
             }
             Screen::Worktree => {
-                "commands: j/k move, gg/G top/bottom, / filter, enter select, n new, ctrl+d delete, esc back, ? help, q quit"
+                "commands: j/k move, gg/G top/bottom, / filter, enter select, n new, dd delete, esc back, ? help, q quit"
             }
         },
     }
@@ -1045,6 +1051,34 @@ fn run_delete_worktree(main: PathBuf, target: PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn handle_worktree_delete_chord(
+    state: &mut AppState,
+    c: char,
+    vis_wt_idx: &[usize],
+) -> anyhow::Result<bool> {
+    if c != 'd' {
+        state.pending_d = false;
+        return Ok(false);
+    }
+
+    if state.pending_d {
+        state.pending_d = false;
+        let i = *vis_wt_idx
+            .get(state.wt_selected)
+            .context("no worktree selected")?;
+        let e = state.wt_entries.get(i).context("no worktree selected")?;
+        let target = PathBuf::from(&e.path);
+        state.pending_delete = Some(target.clone());
+        state.mode = Mode::ConfirmDelete;
+        state.status = format!("delete {} ? (y/n)", target.to_string_lossy());
+        return Ok(true);
+    }
+
+    state.pending_d = true;
+    state.last_d_at = Instant::now();
+    Ok(false)
+}
+
 fn persist_repo_anchor(cfg_root: &Path, repo_hash: &str, anchor: &Path) {
     let cfg_path = cfg_root.join("repos").join(repo_hash).join("config.toml");
     if let Ok(s) = std::fs::read_to_string(&cfg_path)
@@ -1107,7 +1141,7 @@ Keys:
 - /: filter
 - enter: select highlighted worktree
 - n: create a new worktree for this repo (then select it)
-- ctrl+d: delete highlighted worktree (confirmation; branch preserved)
+- dd: delete highlighted worktree (confirmation; branch preserved)
 - esc: back to repos
 - ?: help
 - q: quit
@@ -1278,9 +1312,51 @@ mod tests {
         let job = prepare_delete_worktree(&repo, &wt).unwrap();
         let err = run_delete_worktree(job.main, job.target).unwrap_err();
         assert!(
-            err.to_string().contains("contains modified or untracked files"),
+            err.to_string()
+                .contains("contains modified or untracked files"),
             "expected git dirty-worktree error, got: {err:#}"
         );
+    }
+
+    #[test]
+    fn dd_begins_delete_confirmation_for_highlighted_worktree() {
+        // spec: GW-PICK-106
+        let target = PathBuf::from("/tmp/worktree-a");
+        let mut state = AppState {
+            screen: Screen::Worktree,
+            mode: Mode::Normal,
+            status: String::new(),
+            pending_delete: None,
+            delete_in_progress: None,
+            repo_filter: String::new(),
+            repo_selected: 0,
+            repo_list_state: ListState::default(),
+            active_repo: None,
+            wt_filter: String::new(),
+            wt_selected: 0,
+            wt_list_state: ListState::default(),
+            wt_entries: vec![WorktreeEntry {
+                path: target.to_string_lossy().to_string(),
+                branch: Some("feat".to_string()),
+            }],
+            hotkey_buf: String::new(),
+            last_hotkey_at: Instant::now(),
+            pending_g: false,
+            last_g_at: Instant::now(),
+            pending_d: false,
+            last_d_at: Instant::now(),
+        };
+
+        let vis_wt_idx = vec![0];
+        handle_worktree_delete_chord(&mut state, 'd', &vis_wt_idx).unwrap();
+        assert_eq!(state.mode, Mode::Normal);
+        assert!(state.pending_delete.is_none());
+
+        let triggered = handle_worktree_delete_chord(&mut state, 'd', &vis_wt_idx).unwrap();
+        assert!(triggered);
+        assert_eq!(state.mode, Mode::ConfirmDelete);
+        assert_eq!(state.pending_delete.as_deref(), Some(target.as_path()));
+        assert!(state.status.contains("delete"));
     }
 }
 
@@ -1313,7 +1389,7 @@ fn hotkey_pool_repos() -> Vec<char> {
 
 fn hotkey_pool_worktrees() -> Vec<char> {
     vec![
-        'a', 's', 'd', 'f', 'h', 'l', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', 'z', 'x', 'c',
-        'v', 'b', 'm',
+        'a', 's', 'f', 'h', 'l', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', 'z', 'x', 'c', 'v',
+        'b', 'm',
     ]
 }
